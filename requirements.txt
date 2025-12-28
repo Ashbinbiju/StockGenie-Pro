@@ -1,0 +1,15 @@
+streamlit
+pandas
+numpy
+ta
+plotly
+requests
+python-dotenv
+smartapi-python
+pyotp
+spacy
+pytrends
+arch
+diskcache
+tqdm
+watchdog
