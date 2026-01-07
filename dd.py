@@ -331,13 +331,17 @@ def fetch_nse_stock_list():
 # Limit: 3 requests per second => 1 request every ~0.34 seconds
 last_api_call_time = 0
 
-def enforce_rate_limit(min_interval=0.4):
+# Thread-safe rate limiter
+rate_limit_lock = threading.Lock()
+
+def enforce_rate_limit(min_interval=0.5): # Increased to 0.5s (2 req/s) for safety
     global last_api_call_time
-    current_time = time.time()
-    elapsed = current_time - last_api_call_time
-    if elapsed < min_interval:
-        time.sleep(min_interval - elapsed)
-    last_api_call_time = time.time()
+    with rate_limit_lock:
+        current_time = time.time()
+        elapsed = current_time - last_api_call_time
+        if elapsed < min_interval:
+            time.sleep(min_interval - elapsed)
+        last_api_call_time = time.time()
 
 @retry(max_retries=5, delay=5)
 def fetch_stock_data_with_auth(symbol, period="2y", interval="1d"):
@@ -387,27 +391,40 @@ def fetch_stock_data_with_auth(symbol, period="2y", interval="1d"):
         # Enforce rate limit before making the API call
         enforce_rate_limit()
 
-        historical_data = smart_api.getCandleData({
-            "exchange": "NSE",
-            "symboltoken": symboltoken,
-            "interval": api_interval,
-            "fromdate": start_date.strftime("%Y-%m-%d %H:%M"),
-            "todate": end_date.strftime("%Y-%m-%d %H:%M")
-        })
+        # Retry logic for API instability
+        for attempt in range(3):
+            try:
+                historical_data = smart_api.getCandleData({
+                    "exchange": "NSE",
+                    "symboltoken": symboltoken,
+                    "interval": api_interval,
+                    "fromdate": start_date.strftime("%Y-%m-%d %H:%M"),
+                    "todate": end_date.strftime("%Y-%m-%d %H:%M")
+                })
+                
+                if historical_data and isinstance(historical_data, dict) and historical_data.get('status') and historical_data.get('data'):
+                    data = pd.DataFrame(historical_data['data'], columns=['Date', 'Open', 'High', 'Low', 'Close', 'Volume'])
+                    data['Date'] = pd.to_datetime(data['Date'])
+                    data.set_index('Date', inplace=True)
+                    buffer = io.BytesIO()
+                    data.to_pickle(buffer)
+                    cache.set(cache_key, buffer.getvalue(), expire=86400)
+                    return data
+                elif historical_data and isinstance(historical_data, dict) and (historical_data.get('errorcode') == 'AB1004' or historical_data.get('message') == 'Internal Server Error'):
+                     # Retry on recognized temporary server errors
+                     logging.warning(f"Server error for {symbol}, retrying ({attempt+1}/3)...")
+                     time.sleep(1 * (attempt + 1))
+                     continue
+                else:
+                    # Data missing but no error code, likely valid empty response
+                    return pd.DataFrame()
 
-        if historical_data and isinstance(historical_data, dict) and historical_data.get('status') and historical_data.get('data'):
-            data = pd.DataFrame(historical_data['data'], columns=['Date', 'Open', 'High', 'Low', 'Close', 'Volume'])
-            data['Date'] = pd.to_datetime(data['Date'])
-            data.set_index('Date', inplace=True)
+            except Exception as e:
+                # Catch connection errors/timeouts during call
+                 logging.warning(f"Exception for {symbol}, retrying ({attempt+1}/3): {str(e)}")
+                 time.sleep(1 * (attempt + 1))
 
-            buffer = io.BytesIO()
-            data.to_pickle(buffer)
-            cache.set(cache_key, buffer.getvalue(), expire=86400)
-            return data
-        else:
-            # Gentle warning instead of raising huge error if data is just missing
-            # print(f"No data for {symbol}: {historical_data}")
-            return pd.DataFrame()
+        return pd.DataFrame()
 
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 429:
@@ -417,8 +434,8 @@ def fetch_stock_data_with_auth(symbol, period="2y", interval="1d"):
     except Exception as e:
         # Check for specific "Rate Limit" string in exception message
         if "exceeding access rate" in str(e):
-             logging.warning(f"Rate limit hit for {symbol}. Slowing down...")
-             time.sleep(2)
+             logging.warning(f"Rate limit hit for {symbol}. Prioritizing safety sleep...")
+             time.sleep(5) # Long sleep if hit hard limit
              return pd.DataFrame()
         logging.warning(f"⚠️ Error fetching data for {symbol}: {str(e)}")
         return pd.DataFrame()
@@ -1679,7 +1696,8 @@ def analyze_batch(stock_batch, patience="high", interval="1d"):
     recommendation_mode = st.session_state.get('recommendation_mode', 'Standard')
     
     results = []
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    # Reduced max_workers to 2 to prevent API Rate Limit hits
+    with ThreadPoolExecutor(max_workers=2) as executor:
         # Pass recommendation_mode explicitly to the worker
         futures = {executor.submit(analyze_stock_parallel, symbol, patience, interval, recommendation_mode): symbol for symbol in stock_batch}
         for future in as_completed(futures):
