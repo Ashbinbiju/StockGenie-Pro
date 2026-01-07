@@ -2351,10 +2351,10 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                         Intraday: {colored_recommendation(row.get('Intraday', 'N/A'))}
                         
                         **Strategy Notes:**
-                        {row.get('Pattern Notes', 'Standard Analysis')}
+                        {row.get('Pattern Notes') or 'Standard Technical Setup'}
                         
                         **Entry Advice:**
-                        {row.get('Entry Strategy', 'Standard Entry')}
+                        {row.get('Entry Strategy') or 'Standard Entry (Risk 1-2%)'}
                         """)
         else:
             st.warning("⚠️ No intraday picks available due to data issues.")
