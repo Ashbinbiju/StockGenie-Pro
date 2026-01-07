@@ -381,7 +381,7 @@ def fetch_stock_data_with_auth(symbol, period="2y", interval="1d"):
         symbol_token_map = load_symbol_token_map()
         symboltoken = symbol_token_map.get(symbol)
         if not symboltoken:
-            st.warning(f"⚠️ Token not found for symbol: {symbol}")
+            logging.warning(f"⚠️ Token not found for symbol: {symbol}")
             return pd.DataFrame()
 
         # Enforce rate limit before making the API call
@@ -411,16 +411,16 @@ def fetch_stock_data_with_auth(symbol, period="2y", interval="1d"):
 
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 429:
-            st.warning(f"⚠️ Rate limit exceeded for {symbol}. Skipping...")
+            logging.warning(f"⚠️ Rate limit exceeded for {symbol}. Skipping...")
             return pd.DataFrame()
         raise e
     except Exception as e:
         # Check for specific "Rate Limit" string in exception message
         if "exceeding access rate" in str(e):
-             st.warning(f"Rate limit hit for {symbol}. Slowing down...")
+             logging.warning(f"Rate limit hit for {symbol}. Slowing down...")
              time.sleep(2)
              return pd.DataFrame()
-        st.warning(f"⚠️ Error fetching data for {symbol}: {str(e)}")
+        logging.warning(f"⚠️ Error fetching data for {symbol}: {str(e)}")
         return pd.DataFrame()
 
 @lru_cache(maxsize=1000)
@@ -1675,9 +1675,13 @@ def analyze_batch(stock_batch, patience="high", interval="1d"):
     Analyzes a batch of stocks in parallel.
     Returns a list of results (dictionaries) for ALL processed stocks, including failures.
     """
+    # Capture Streamlit state in the main thread
+    recommendation_mode = st.session_state.get('recommendation_mode', 'Standard')
+    
     results = []
     with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = {executor.submit(analyze_stock_parallel, symbol, patience, interval): symbol for symbol in stock_batch}
+        # Pass recommendation_mode explicitly to the worker
+        futures = {executor.submit(analyze_stock_parallel, symbol, patience, interval, recommendation_mode): symbol for symbol in stock_batch}
         for future in as_completed(futures):
             symbol = futures[future]
             try:
@@ -1697,7 +1701,7 @@ def analyze_batch(stock_batch, patience="high", interval="1d"):
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def analyze_stock_parallel(symbol, patience="high", interval="1d"):
+def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendation_mode="Standard"):
     """
     Analyzes a single stock.
     Returns a dictionary with 'Status' (Success, No Data, Error) and detailed analysis or error info.
@@ -1720,7 +1724,6 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d"):
             }
         
         data = analyze_stock(data)
-        recommendation_mode = st.session_state.get('recommendation_mode', 'Standard')
         logging.info(f"Analyzing {symbol} in {recommendation_mode} mode")
         
         if recommendation_mode == "Adaptive":
