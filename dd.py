@@ -44,6 +44,15 @@ def load_symbol_token_map():
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
+# Suppress "missing ScriptRunContext" warnings from threads
+class ContextWarningFilter(logging.Filter):
+    def filter(self, record):
+        return "missing ScriptRunContext" not in record.getMessage()
+
+logging.getLogger().addFilter(ContextWarningFilter())
+# Also try to hush the specific logger used by Streamlit runner
+logging.getLogger("streamlit.runtime.scriptrunner.script_runner").addFilter(ContextWarningFilter())
+
 CLIENT_ID = os.getenv("CLIENT_ID")
 PASSWORD = os.getenv("PASSWORD")
 TOTP_SECRET = os.getenv("TOTP_SECRET")
