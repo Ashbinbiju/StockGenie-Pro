@@ -1293,7 +1293,8 @@ def generate_recommendations(data, symbol=None):
         "Short-Term": "Hold", "Long-Term": "Hold",
         "Mean_Reversion": "Hold", "Breakout": "Hold", "Ichimoku_Trend": "Hold",
         "Current Price": None, "Buy At": None,
-        "Stop Loss": None, "Target": None, "Score": 0
+        "Stop Loss": None, "Target": None, "Score": 0,
+        "Pattern Notes": None, "Entry Strategy": None # Added for advanced details
     }
 
     if not validate_data(data, min_length=27):
@@ -1307,6 +1308,21 @@ def generate_recommendations(data, symbol=None):
         recommendations["Current Price"] = float(data['Close'].iloc[-1])
         buy_score = 0
         sell_score = 0
+        
+        # --- Advanced Pattern Detection Integration ---
+        adv_pattern = detect_advanced_patterns(data)
+        if adv_pattern:
+            if adv_pattern['action'] == "BUY":
+                buy_score += 5 # High weight
+                recommendations["Breakout"] = "Buy"
+                recommendations["Pattern Notes"] = f"✅ {adv_pattern['pattern']}: {adv_pattern['desc']}"
+                recommendations["Entry Strategy"] = "⚠️ Pyramiding Advice: Enter 25% qty now. Add 75% qty on strong follow-up candle."
+            elif adv_pattern['action'] == "STRONG BUY":
+                buy_score += 8 # Very High weight
+                recommendations["Breakout"] = "Strong Buy"
+                recommendations["Pattern Notes"] = f"🚀 {adv_pattern['pattern']}: {adv_pattern['desc']}"
+                recommendations["Entry Strategy"] = "⚠️ Pyramiding Advice: Enter 25% qty now. Add 75% qty on strong follow-up candle."
+        # ----------------------------------------------
 
         if 'RSI' in data.columns and data['RSI'].iloc[-1] is not None and len(data['RSI'].dropna()) >= 1:
             if isinstance(data['RSI'].iloc[-1], (int, float, np.integer, np.floating)):
