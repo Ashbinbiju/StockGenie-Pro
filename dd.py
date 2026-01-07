@@ -1333,7 +1333,8 @@ def detect_advanced_patterns(data, window=20):
                 "pattern": "Increasing Demand",
                 "action": "BUY",
                 "confidence": "High",
-                "desc": "Higher lows into resistance (Ascending Triangle). Buyers absorbing supply."
+                "desc": "Higher lows into resistance (Ascending Triangle). Buyers absorbing supply.",
+                "breakout_level": avg_high
             }
 
         # 2. Fake-out Reversal / Bear Trap Detection
@@ -1356,7 +1357,8 @@ def detect_advanced_patterns(data, window=20):
                 "pattern": "Fake-out Reversal",
                 "action": "STRONG BUY",
                 "confidence": "Very High",
-                "desc": "Liquidity sweep below support followed by strong rejection (Bear Trap)."
+                "desc": "Liquidity sweep below support followed by strong rejection (Bear Trap).",
+                "breakout_level": current_close # For Bear Trap, entry IS the confirmation, confirmation is High of this candle
             }
 
     except Exception as e:
@@ -1389,16 +1391,17 @@ def generate_recommendations(data, symbol=None):
         # --- Advanced Pattern Detection Integration ---
         adv_pattern = detect_advanced_patterns(data)
         if adv_pattern:
+            breakout_lvl = adv_pattern.get('breakout_level', recommendations["Current Price"])
             if adv_pattern['action'] == "BUY":
                 buy_score += 5 # High weight
                 recommendations["Breakout"] = "Buy"
                 recommendations["Pattern Notes"] = f"✅ {adv_pattern['pattern']}: {adv_pattern['desc']}"
-                recommendations["Entry Strategy"] = "⚠️ Pyramiding Advice: Enter 25% qty now. Add 75% qty on strong follow-up candle."
+                recommendations["Entry Strategy"] = f"⚠️ Pyramiding: Buy 25% qty Now. Add remaining 75% above ₹{breakout_lvl:.2f}."
             elif adv_pattern['action'] == "STRONG BUY":
                 buy_score += 8 # Very High weight
                 recommendations["Breakout"] = "Strong Buy"
                 recommendations["Pattern Notes"] = f"🚀 {adv_pattern['pattern']}: {adv_pattern['desc']}"
-                recommendations["Entry Strategy"] = "⚠️ Pyramiding Advice: Enter 25% qty now. Add 75% qty on strong follow-up candle."
+                recommendations["Entry Strategy"] = f"⚠️ Pyramiding: Buy 25% qty Now. Add remaining 75% above ₹{breakout_lvl:.2f} (Confirmation)."
         # ----------------------------------------------
 
         if 'RSI' in data.columns and data['RSI'].iloc[-1] is not None and len(data['RSI'].dropna()) >= 1:
