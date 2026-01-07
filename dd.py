@@ -2207,23 +2207,6 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
 
     # Intraday top picks button
     if st.button("⚡ Generate Intraday Top 5 Picks"):
-        # [NEW] Sector Performance Overview (Bloomberg Style)
-        with st.expander("📊 Market Sector Performance (Live)", expanded=False):
-            with st.spinner("Analyzing Sectors..."):
-                sector_df = calculate_sector_performance()
-                if not sector_df.empty:
-                    # Color Styling for DataFrame
-                    def color_survived(val):
-                        color = '#90EE90' if val > 0 else '#FFB6C1'
-                        return f'background-color: {color}; color: black'
-                    
-                    st.dataframe(
-                        sector_df.style.applymap(color_survived, subset=['% Change']),
-                        use_container_width=True,
-                        hide_index=True
-                    )
-                else:
-                    st.info("Sector data loading...")
 
         progress_bar = st.progress(0)
         loading_text = st.empty()
