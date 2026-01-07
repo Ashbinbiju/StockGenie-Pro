@@ -1296,6 +1296,74 @@ def adaptive_recommendation(data, symbol=None):
             "Reason": f"Error: {str(e)}"
         }
         
+def detect_advanced_patterns(data, window=20):
+    """
+    Detects advanced breakout patterns:
+    1. Increasing Demand (Ascending Triangle)
+    2. Fake-out Reversal (Bear Trap)
+    Returns a dictionary with pattern detected and description.
+    """
+    if data is None or len(data) < window + 5:
+        return None
+
+    try:
+        # Get recent data
+        recent = data.iloc[-window:]
+        current_close = recent['Close'].iloc[-1]
+        
+        # 1. Increasing Demand / Ascending Triangle Detection
+        # Logic: Highs are relatively flat (resistance), Lows are making higher lows
+        highs = recent['High'].values
+        lows = recent['Low'].values
+        
+        # Check for resistance (flat highs) - simpler approximation
+        avg_high = np.mean(highs[-5:]) # Last 5 bars
+        resistance_variance = np.var(highs[-5:])
+        
+        # Check for higher lows (Slope of lows should be positive)
+        # Use simple linear regression on lows
+        x = np.arange(len(lows))
+        slope, _ = np.polyfit(x, lows, 1)
+        
+        is_resistance_flat = resistance_variance < (current_close * 0.005) # Variance within 0.5%
+        is_demand_increasing = slope > 0.05 # Positive slope on lows
+        
+        if is_resistance_flat and is_demand_increasing and current_close >= (avg_high * 0.99):
+            return {
+                "pattern": "Increasing Demand",
+                "action": "BUY",
+                "confidence": "High",
+                "desc": "Higher lows into resistance (Ascending Triangle). Buyers absorbing supply."
+            }
+
+        # 2. Fake-out Reversal / Bear Trap Detection
+        # Logic: Price dipped below recent support (last 10-20 bars) but closed strong
+        recent_support = data['Low'].iloc[-(window+10):-5].min() # Support from slightly older data
+        recent_low = recent['Low'].min()
+        
+        # Did we sweep liquidity below support?
+        liquidity_sweep = recent_low < recent_support
+        
+        # Did we close strong back above support?
+        strong_close = current_close > recent_support
+        
+        # Is the current candle bullish/strong?
+        current_open = recent['Open'].iloc[-1]
+        is_bullish_candle = current_close > current_open
+        
+        if liquidity_sweep and strong_close and is_bullish_candle:
+             return {
+                "pattern": "Fake-out Reversal",
+                "action": "STRONG BUY",
+                "confidence": "Very High",
+                "desc": "Liquidity sweep below support followed by strong rejection (Bear Trap)."
+            }
+
+    except Exception as e:
+        logging.warning(f"Error in detect_advanced_patterns: {e}")
+    
+    return None
+
 def generate_recommendations(data, symbol=None):
     recommendations = {
         "Intraday": "Hold", "Swing": "Hold",
