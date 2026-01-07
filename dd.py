@@ -1875,9 +1875,12 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
                 "Position Size": rec.get("Position Size"),
                 "Trailing Stop": rec.get("Trailing Stop"),
                 "Entry Type": rec.get("Entry Type", "Standard"),
+                "Entry Type": rec.get("Entry Type", "Standard"),
                 "Reason": rec.get("Reason"),
-                "Intraday": None,
-                "Swing": None,
+                "Pattern Notes": rec.get("Pattern Notes"), # Pass through
+                "Entry Strategy": rec.get("Entry Strategy"), # Pass through
+                "Intraday": rec.get("Intraday", "Hold"),
+                "Swing": rec.get("Swing", "Hold"),
                 "Short-Term": None,
                 "Long-Term": None,
                 "Mean_Reversion": None,
@@ -1914,6 +1917,8 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
                 "Buy At": rec.get("Buy At"),
                 "Stop Loss": rec.get("Stop Loss"),
                 "Target": rec.get("Target"),
+                "Pattern Notes": rec.get("Pattern Notes"), # Pass through
+                "Entry Strategy": rec.get("Entry Strategy"), # Pass through
                 "Intraday": rec.get("Intraday", "Hold"),
                 "Swing": rec.get("Swing", "Hold"),
                 "Short-Term": rec.get("Short-Term", "Hold"),
@@ -2344,6 +2349,12 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                         {buy_icon} {buy_label}: ₹{buy_at} | Stop Loss: ₹{stop_loss}  
                         Target: ₹{target}  
                         Intraday: {colored_recommendation(row.get('Intraday', 'N/A'))}
+                        
+                        **Strategy Notes:**
+                        {row.get('Pattern Notes', 'Standard Analysis')}
+                        
+                        **Entry Advice:**
+                        {row.get('Entry Strategy', 'Standard Entry')}
                         """)
         else:
             st.warning("⚠️ No intraday picks available due to data issues.")
