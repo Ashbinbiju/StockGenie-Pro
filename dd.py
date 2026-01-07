@@ -1670,14 +1670,14 @@ def insert_top_picks(results_df, pick_type="daily"):
     conn.commit()
     conn.close()
 
-def analyze_batch(stock_batch, patience="high"):
+def analyze_batch(stock_batch, patience="high", interval="1d"):
     """
     Analyzes a batch of stocks in parallel.
     Returns a list of results (dictionaries) for ALL processed stocks, including failures.
     """
     results = []
     with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = {executor.submit(analyze_stock_parallel, symbol, patience): symbol for symbol in stock_batch}
+        futures = {executor.submit(analyze_stock_parallel, symbol, patience, interval): symbol for symbol in stock_batch}
         for future in as_completed(futures):
             symbol = futures[future]
             try:
@@ -1697,14 +1697,16 @@ def analyze_batch(stock_batch, patience="high"):
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def analyze_stock_parallel(symbol, patience="high"):
+def analyze_stock_parallel(symbol, patience="high", interval="1d"):
     """
     Analyzes a single stock.
     Returns a dictionary with 'Status' (Success, No Data, Error) and detailed analysis or error info.
     """
     try:
         logging.info(f"Starting analysis for {symbol}")
-        data = fetch_stock_data_cached(symbol)
+        # Adjust period based on interval for efficiency
+        period = "2y" if interval == "1d" else "1mo" 
+        data = fetch_stock_data_cached(symbol, period=period, interval=interval)
         
         if data.empty or len(data) < 50:
             logging.warning(f"No sufficient data for {symbol}: {len(data) if data is not None else 0} rows")
@@ -1987,8 +1989,8 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
     total_batches = (len(stock_list) // batch_size) + (1 if len(stock_list) % batch_size != 0 else 0)
     for i in range(0, len(stock_list), batch_size):
         batch = stock_list[i:i + batch_size]
-        # Pass patience="low" for Intraday scans
-        batch_results = analyze_batch(batch, patience="low")
+        # Pass patience="low" AND interval="15m" for True Intraday scans
+        batch_results = analyze_batch(batch, patience="low", interval="15m")
         results.extend([r for r in batch_results if r is not None])
         if progress_callback:
             progress_callback((i + len(batch)) / len(stock_list))
