@@ -1298,8 +1298,8 @@ def adaptive_recommendation(data, symbol=None):
         
 def detect_advanced_patterns(data, window=20):
     """
-    Detects advanced breakout patterns:
-    1. Increasing Demand (Ascending Triangle)
+    Detects advanced breakout patterns with STRICT filters:
+    1. Increasing Demand (Ascending Triangle) - Requires Trend & Quality Slope
     2. Fake-out Reversal (Bear Trap)
     Returns a dictionary with pattern detected and description.
     """
@@ -1311,24 +1311,43 @@ def detect_advanced_patterns(data, window=20):
         recent = data.iloc[-window:]
         current_close = recent['Close'].iloc[-1]
         
-        # 1. Increasing Demand / Ascending Triangle Detection
+        # --- PRE-FILTERS ---
+        # 1. Trend Filter: Must be above EMA 50 to ensure we aren't catching falling knives
+        if 'EMA_50' in recent.columns and pd.notnull(recent['EMA_50'].iloc[-1]):
+             if current_close < recent['EMA_50'].iloc[-1]:
+                 return None # Downtrend -> Ignore all bullish patterns
+        
+        # 2. Volume Check: Recent action must have some volume (avoid dead stocks)
+        avg_vol = recent['Volume'].mean()
+        current_vol = recent['Volume'].iloc[-1]
+        if current_vol < (avg_vol * 0.5): # At least 50% of avg volume required
+            return None
+
+        # --- PATTERN 1: Increasing Demand (Ascending Triangle) ---
         # Logic: Highs are relatively flat (resistance), Lows are making higher lows
         highs = recent['High'].values
         lows = recent['Low'].values
         
-        # Check for resistance (flat highs) - simpler approximation
+        # Check for resistance (flat highs)
         avg_high = np.mean(highs[-5:]) # Last 5 bars
         resistance_variance = np.var(highs[-5:])
+        is_resistance_flat = resistance_variance < (current_close * 0.005)
         
-        # Check for higher lows (Slope of lows should be positive)
-        # Use simple linear regression on lows
+        # Check for higher lows (Positive Slope + Quality Fit)
         x = np.arange(len(lows))
         slope, _ = np.polyfit(x, lows, 1)
         
-        is_resistance_flat = resistance_variance < (current_close * 0.005) # Variance within 0.5%
-        is_demand_increasing = slope > 0.05 # Positive slope on lows
+        # Calculate R-Squared to verify it's a real line, not noise
+        correlation_matrix = np.corrcoef(x, lows)
+        correlation_xy = correlation_matrix[0,1]
+        r_squared = correlation_xy**2
         
-        if is_resistance_flat and is_demand_increasing and current_close >= (avg_high * 0.99):
+        is_demand_increasing = slope > 0.05 and r_squared > 0.6 # Stricter: Real positive trend
+        
+        # Breakout Potential: Close must be near resistance
+        near_resistance = current_close >= (avg_high * 0.98)
+
+        if is_resistance_flat and is_demand_increasing and near_resistance:
             return {
                 "pattern": "Increasing Demand",
                 "action": "BUY",
@@ -1337,28 +1356,30 @@ def detect_advanced_patterns(data, window=20):
                 "breakout_level": avg_high
             }
 
-        # 2. Fake-out Reversal / Bear Trap Detection
+        # --- PATTERN 2: Fake-out Reversal (Bear Trap) ---
         # Logic: Price dipped below recent support (last 10-20 bars) but closed strong
-        recent_support = data['Low'].iloc[-(window+10):-5].min() # Support from slightly older data
+        recent_support = data['Low'].iloc[-(window+10):-5].min() 
         recent_low = recent['Low'].min()
         
-        # Did we sweep liquidity below support?
+        # Trap Logic:
+        # 1. Sweep: Low went below support
         liquidity_sweep = recent_low < recent_support
-        
-        # Did we close strong back above support?
+        # 2. Rejection: Close is back above support
         strong_close = current_close > recent_support
-        
-        # Is the current candle bullish/strong?
+        # 3. Shape: Bullish Candle
         current_open = recent['Open'].iloc[-1]
         is_bullish_candle = current_close > current_open
+        # 4. Proximity: The dip shouldn't be a massive crash (e.g. < 3% drop below support)
+        # If it dropped 10% then came back, that's too volatile.
+        valid_depth = (recent_support - recent_low) / recent_support < 0.03
         
-        if liquidity_sweep and strong_close and is_bullish_candle:
+        if liquidity_sweep and strong_close and is_bullish_candle and valid_depth:
              return {
                 "pattern": "Fake-out Reversal",
                 "action": "STRONG BUY",
                 "confidence": "Very High",
                 "desc": "Liquidity sweep below support followed by strong rejection (Bear Trap).",
-                "breakout_level": current_close # For Bear Trap, entry IS the confirmation, confirmation is High of this candle
+                "breakout_level": current_close
             }
 
     except Exception as e:
