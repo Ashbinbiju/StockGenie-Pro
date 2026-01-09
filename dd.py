@@ -418,7 +418,16 @@ def fetch_stock_data_with_auth(symbol, period="2y", interval="1d"):
                     data.set_index('Date', inplace=True)
                     buffer = io.BytesIO()
                     data.to_pickle(buffer)
-                    cache.set(cache_key, buffer.getvalue(), expire=86400)
+                    
+                    # Dynamic Cache Expiry: Intraday needs freshness!
+                    if interval in ['5m', '15m']:
+                        expire_time = 300 # 5 minutes for intraday
+                    elif interval == '1h':
+                        expire_time = 1800 # 30 mins for hourly
+                    else:
+                        expire_time = 43200 # 12 hours for daily
+                        
+                    cache.set(cache_key, buffer.getvalue(), expire=expire_time)
                     return data
                 elif historical_data and isinstance(historical_data, dict) and (historical_data.get('errorcode') == 'AB1004' or historical_data.get('message') == 'Internal Server Error'):
                      # Retry on recognized temporary server errors
