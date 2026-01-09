@@ -1940,7 +1940,9 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
                     "Status": "Analysis Failed",
                     "Error": "Standard Recommendation returned empty",
                     "Score": 0,
-                    "Recommendation": "N/A"
+                    "Recommendation": "N/A",
+                    "Intraday": "Hold", 
+                    "Swing": "Hold"
                 }
 
             return {
@@ -1975,7 +1977,9 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
             "Status": "Error",
             "Error": str(e),
             "Score": 0,
-            "Recommendation": "N/A"
+            "Recommendation": "N/A",
+            "Intraday": "Hold",
+            "Swing": "Hold"
         }
 
 def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
@@ -2152,10 +2156,15 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
     results_df = pd.DataFrame(results)
     if results_df.empty:
         return pd.DataFrame()
+    
+    # Ensure all required columns exist to avoid KeyError
+    expected_cols = ["Score", "Current Price", "Intraday", "Recommendation", "Buy At"]
+    for col in expected_cols:
+        if col not in results_df.columns:
+            results_df[col] = None 
+
     if "Score" not in results_df.columns:
         results_df["Score"] = 0
-    if "Current Price" not in results_df.columns:
-        results_df["Current Price"] = None
         
     # Filter out invalid 'Buy At' entries (e.g. from Choppy Markets)
     if "Buy At" in results_df.columns:
