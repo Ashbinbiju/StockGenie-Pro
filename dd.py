@@ -429,6 +429,15 @@ def fetch_stock_data_with_auth(symbol, period="2y", interval="1d"):
                         
                     cache.set(cache_key, buffer.getvalue(), expire=expire_time)
                     return data
+                
+                # Handling INVALID TOKEN (AG8001) - Force Re-login
+                elif historical_data and isinstance(historical_data, dict) and historical_data.get('errorCode') == 'AG8001':
+                    logging.warning(f"⚠️ Invalid Token for {symbol} (AG8001). Clearing cache & re-logging in...")
+                    st.cache_resource.clear() # Clear cached session
+                    smart_api = get_smartapi_session() # Get fresh session
+                    time.sleep(1) # Slight pause before retry
+                    continue # Retry loop with new session
+
                 elif historical_data and isinstance(historical_data, dict) and (historical_data.get('errorcode') == 'AB1004' or historical_data.get('message') == 'Internal Server Error'):
                      # Retry on recognized temporary server errors
                      logging.warning(f"Server error for {symbol}, retrying ({attempt+1}/3)...")
