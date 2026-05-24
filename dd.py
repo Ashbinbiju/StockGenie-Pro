@@ -56,8 +56,9 @@ logging.getLogger("streamlit.runtime.scriptrunner.script_runner").addFilter(Cont
 CLIENT_ID = os.getenv("CLIENT_ID")
 PASSWORD = os.getenv("PASSWORD")
 TOTP_SECRET = os.getenv("TOTP_SECRET")
+HISTORICAL_API_KEY = os.getenv("HISTORICAL_API_KEY") or os.getenv("ANGELONE_API_KEY")
 API_KEYS = {
-    "Historical": "c3C0tMGn",
+    "Historical": HISTORICAL_API_KEY,
     "Trading": os.getenv("TRADING_API_KEY"),
     "Market": os.getenv("MARKET_API_KEY")
 }
@@ -76,6 +77,8 @@ USER_AGENTS = [
 ]
 
 cache = Cache("stock_data_cache")
+smartapi_auth_error = None
+smartapi_auth_lock = threading.Lock()
 
 TOOLTIPS = {
     "RSI": "Relative Strength Index (30=Oversold, 70=Overbought)",
@@ -279,17 +282,35 @@ def get_smartapi_session():
     Initializes and caches the SmartAPI session to avoid repeated logins.
     Logins are limited to 1 per second, but we should only need one per day/session.
     """
+    missing = [
+        name for name, value in {
+            "CLIENT_ID": CLIENT_ID,
+            "PASSWORD": PASSWORD,
+            "TOTP_SECRET": TOTP_SECRET,
+            "HISTORICAL_API_KEY": API_KEYS["Historical"],
+        }.items()
+        if not value
+    ]
+    if missing:
+        st.error(f"SmartAPI credentials missing in .env: {', '.join(missing)}")
+        return None
+
     try:
         smart_api = SmartConnect(api_key=API_KEYS["Historical"])
         totp = pyotp.TOTP(TOTP_SECRET)
         data = smart_api.generateSession(CLIENT_ID, PASSWORD, totp.now())
-        if data['status']:
+        if data.get('status'):
+            clear_smartapi_auth_error()
             return smart_api
         else:
-            st.error(f"⚠️ SmartAPI authentication failed: {data['message']}")
+            message = data.get('message', 'Unknown authentication error')
+            error_code = data.get('errorCode') or data.get('errorcode')
+            if error_code:
+                message = f"{message} ({error_code})"
+            st.error(f"SmartAPI authentication failed: {message}")
             return None
     except Exception as e:
-        st.error(f"⚠️ Error initializing SmartAPI: {str(e)}")
+        st.error(f"Error initializing SmartAPI: {str(e)}")
         return None
 
 def tooltip(label, explanation):
@@ -353,6 +374,20 @@ def enforce_rate_limit(min_interval=0.5): # Increased to 0.5s (2 req/s) for safe
             time.sleep(min_interval - elapsed)
         last_api_call_time = time.time()
 
+def set_smartapi_auth_error(message):
+    global smartapi_auth_error
+    with smartapi_auth_lock:
+        smartapi_auth_error = message
+
+def get_smartapi_auth_error():
+    with smartapi_auth_lock:
+        return smartapi_auth_error
+
+def clear_smartapi_auth_error():
+    global smartapi_auth_error
+    with smartapi_auth_lock:
+        smartapi_auth_error = None
+
 @retry(max_retries=5, delay=5)
 def fetch_stock_data_with_auth(symbol, period="2y", interval="1d"):
     cache_key = f"{symbol}_{period}_{interval}"
@@ -361,6 +396,11 @@ def fetch_stock_data_with_auth(symbol, period="2y", interval="1d"):
         return pd.read_pickle(io.BytesIO(cached_data))
 
     try:
+        auth_error = get_smartapi_auth_error()
+        if auth_error:
+            logging.warning(f"Skipping SmartAPI request for {symbol}: {auth_error}")
+            return pd.DataFrame()
+
         if "-EQ" not in symbol:
             symbol = f"{symbol.split('.')[0]}-EQ"
 
@@ -368,7 +408,6 @@ def fetch_stock_data_with_auth(symbol, period="2y", interval="1d"):
         smart_api = get_smartapi_session()
         if not smart_api:
             # If session failed, try to re-initialize once (maybe expired)
-            SmartConnect.generateSession = get_smartapi_session.func # Hack to access original func if needed, but clearing cache is safer
             st.cache_resource.clear()
             smart_api = get_smartapi_session()
             if not smart_api:
@@ -437,6 +476,14 @@ def fetch_stock_data_with_auth(symbol, period="2y", interval="1d"):
                     smart_api = get_smartapi_session() # Get fresh session
                     time.sleep(1) # Slight pause before retry
                     continue # Retry loop with new session
+
+                elif historical_data and isinstance(historical_data, dict) and (historical_data.get('errorCode') == 'AG8004' or historical_data.get('errorcode') == 'AG8004'):
+                    message = historical_data.get('message', 'Invalid SmartAPI API key')
+                    auth_error = f"{message} (AG8004)"
+                    set_smartapi_auth_error(auth_error)
+                    logging.error(f"SmartAPI authentication failed for {symbol}: {auth_error}")
+                    st.cache_resource.clear()
+                    return pd.DataFrame()
 
                 elif historical_data and isinstance(historical_data, dict) and (historical_data.get('errorcode') == 'AB1004' or historical_data.get('message') == 'Internal Server Error'):
                      # Retry on recognized temporary server errors

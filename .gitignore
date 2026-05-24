@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pyc
+logs/
+stock_data_cache/
+cache_directory/
