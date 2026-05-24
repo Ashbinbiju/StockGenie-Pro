@@ -125,6 +125,7 @@ RANKING_WEIGHTS = {
     "liquidity": 0.10,
     "entry": 0.10,
 }
+OPPORTUNITY_SCORE_SCALE = 10
 
 TOOLTIPS = {
     "RSI": "Relative Strength Index (30=Oversold, 70=Overbought)",
@@ -2590,13 +2591,14 @@ def add_entry_quality_columns(df, sector_momentum=None, nifty_5d_return=0.0):
     ranked_df["Entry Distance Score"] = ranked_df["Entry Distance %"].apply(entry_distance_adjustment)
     ranked_df["Liquidity Score"] = ranked_df["Avg Volume Value"].apply(liquidity_adjustment)
     ranked_df["RVOL Score"] = ranked_df["RVOL"].apply(rvol_adjustment)
-    ranked_df["Ranking Score"] = (
+    raw_opportunity_score = (
         (ranked_df["Relative Strength Score"] * RANKING_WEIGHTS["relative_strength"])
         + (ranked_df["RVOL Score"] * RANKING_WEIGHTS["rvol"])
         + (ranked_df["Sector Momentum Score"] * RANKING_WEIGHTS["sector"])
         + (ranked_df["Liquidity Score"] * RANKING_WEIGHTS["liquidity"])
         + (ranked_df["Entry Distance Score"] * RANKING_WEIGHTS["entry"])
     )
+    ranked_df["Ranking Score"] = (raw_opportunity_score * OPPORTUNITY_SCORE_SCALE).round(1)
     return ranked_df
 
 def limit_top_picks_by_sector(df, max_per_sector=2, limit=5):
