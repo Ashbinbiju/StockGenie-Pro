@@ -2103,21 +2103,29 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
         return pd.DataFrame(), pd.DataFrame() # Return empty pair
     
     # Fill missing columns for consistent structure
-    expected_cols = ["Score", "Current Price", "Recommendation", "Intraday", "Status", "Error"]
+    expected_cols = [
+        "Score", "Current Price", "Buy At", "Recommendation", "Intraday", "Swing",
+        "Short-Term", "Long-Term", "Breakout", "Ichimoku_Trend", "Status", "Error"
+    ]
     for col in expected_cols:
          if col not in results_df.columns:
              results_df[col] = None
 
     # Filter for Top Picks (Success only)
     success_df = results_df[results_df["Status"] == "Success"].copy()
+    success_df = success_df[success_df["Buy At"].apply(is_valid_price)]
 
     # Sort logic for Top Picks
     recommendation_mode = st.session_state.get('recommendation_mode', 'Standard')
     if recommendation_mode == "Adaptive":
         top_picks_df = success_df[success_df["Recommendation"].str.contains("Buy|Sell", na=False)]
     else:
-        # For standard, maybe just default sorts
-        top_picks_df = success_df
+        buy_columns = ["Swing", "Short-Term", "Long-Term", "Breakout", "Ichimoku_Trend"]
+        buy_signal = success_df[buy_columns].apply(
+            lambda row: row.astype(str).str.contains("Buy", na=False).any(),
+            axis=1
+        )
+        top_picks_df = success_df[buy_signal]
 
     top_picks_df = top_picks_df.sort_values(by="Score", ascending=False).head(5)
     
@@ -2290,6 +2298,21 @@ def colored_recommendation(recommendation):
         return f"🔴 {recommendation}"
     else:
         return f"⚪ {recommendation}"
+
+def is_valid_price(value):
+    if isinstance(value, tuple):
+        value = value[0]
+    if value is None:
+        return False
+    try:
+        if pd.isna(value):
+            return False
+    except TypeError:
+        pass
+    try:
+        return float(value) > 0
+    except (TypeError, ValueError):
+        return False
 
 def format_currency(value):
     if isinstance(value, tuple):
