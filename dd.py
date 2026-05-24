@@ -651,14 +651,18 @@ def optimize_rsi_window(data, windows=range(5, 15)):
     return best_window
 
 def detect_divergence(data):
-    rsi = data['RSI']
-    price = data['Close']
-    recent_highs = price[-5:].idxmax()
-    recent_lows = price[-5:].idxmin()
-    rsi_highs = rsi[-5:].idxmax()
-    rsi_lows = rsi[-5:].idxmin()
-    bullish_div = (recent_lows > rsi_lows) and (price[recent_lows] < price[-1]) and (rsi[rsi_lows] < rsi[-1])
-    bearish_div = (recent_highs < rsi_highs) and (price[recent_highs] > price[-1]) and (rsi[rsi_highs] > rsi[-1])
+    recent = data[['Close', 'RSI']].dropna().tail(5)
+    if len(recent) < 5:
+        return "No Divergence"
+
+    price = recent['Close'].reset_index(drop=True)
+    rsi = recent['RSI'].reset_index(drop=True)
+    recent_highs = int(price.idxmax())
+    recent_lows = int(price.idxmin())
+    rsi_highs = int(rsi.idxmax())
+    rsi_lows = int(rsi.idxmin())
+    bullish_div = (recent_lows > rsi_lows) and (price.iloc[recent_lows] < price.iloc[-1]) and (rsi.iloc[rsi_lows] < rsi.iloc[-1])
+    bearish_div = (recent_highs < rsi_highs) and (price.iloc[recent_highs] > price.iloc[-1]) and (rsi.iloc[rsi_highs] > rsi.iloc[-1])
     return "Bullish Divergence" if bullish_div else "Bearish Divergence" if bearish_div else "No Divergence"
 
 def calculate_cmo(close, window=14):
