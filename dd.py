@@ -2209,18 +2209,20 @@ def calculate_sector_performance():
             all_symbols.extend(symbols)
         all_symbols = list(set(all_symbols))
         
-        # Helper to fetch change
+        # Helper to fetch swing-window change.
         live_data = {}
         with ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_symbol = {executor.submit(fetch_stock_data_cached, symbol, "5d"): symbol for symbol in all_symbols} # Fetch 5d for safety
+            future_to_symbol = {executor.submit(fetch_stock_data_cached, symbol, "5d"): symbol for symbol in all_symbols}
             for future in as_completed(future_to_symbol):
                 symbol = future_to_symbol[future]
                 try:
                     data = future.result()
                     if not data.empty and len(data) >= 2:
-                        current = data['Close'].iloc[-1]
-                        prev_close = data['Close'].iloc[-2]
-                        change = ((current - prev_close) / prev_close) * 100
+                        first_close = data["Close"].iloc[0]
+                        last_close = data["Close"].iloc[-1]
+                        if first_close <= 0:
+                            continue
+                        change = ((last_close - first_close) / first_close) * 100
                         live_data[symbol] = change
                 except:
                     pass
