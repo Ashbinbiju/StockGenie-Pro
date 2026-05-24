@@ -116,6 +116,7 @@ cache = Cache("stock_data_cache")
 smartapi_auth_error = None
 smartapi_auth_lock = threading.Lock()
 NIFTY_50_TOKEN = "99926000"
+MIN_TOP_PICK_SCORE = 5
 
 TOOLTIPS = {
     "RSI": "Relative Strength Index (30=Oversold, 70=Overbought)",
@@ -2218,7 +2219,9 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
     success_df = results_df[results_df["Status"] == "Success"].copy()
     sector_momentum = calculate_sector_momentum_map(success_df)
     nifty_5d_return = fetch_nifty_5d_return()
+    success_df["Score"] = pd.to_numeric(success_df["Score"], errors="coerce").fillna(0)
     success_df = success_df[success_df.apply(is_actionable_entry, axis=1)]
+    success_df = success_df[success_df["Score"] >= MIN_TOP_PICK_SCORE]
 
     # Sort logic for Top Picks
     recommendation_mode = st.session_state.get('recommendation_mode', 'Standard')
@@ -2334,7 +2337,9 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
 
     sector_momentum = calculate_sector_momentum_map(results_df)
     nifty_5d_return = fetch_nifty_5d_return()
+    results_df["Score"] = pd.to_numeric(results_df["Score"], errors="coerce").fillna(0)
     results_df = results_df[results_df.apply(is_actionable_entry, axis=1)]
+    results_df = results_df[results_df["Score"] >= MIN_TOP_PICK_SCORE]
         
     recommendation_mode = st.session_state.get('recommendation_mode', 'Standard')
     if recommendation_mode == "Adaptive":
