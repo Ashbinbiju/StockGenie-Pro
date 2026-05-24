@@ -2992,13 +2992,18 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                 st.write(f"**Volatility**: {assess_risk(data)}")
 
             st.markdown("---")
-            # Monte Carlo Simulation
+            # Monte Carlo/GARCH is intentionally opt-in. Streamlit evaluates all tabs on
+            # each rerun, so running this unconditionally slows down batch scans.
             st.subheader("🎲 Monte Carlo Projection (30 Days)")
-            simulations = monte_carlo_simulation(data)
-            sim_df = pd.DataFrame(simulations).T
-            sim_df.index = [data.index[-1] + timedelta(days=i) for i in range(len(sim_df))]
-            fig_sim = px.line(sim_df, title="Price Projections")
-            st.plotly_chart(fig_sim, use_container_width=True)
+            if st.button("Run Monte Carlo / GARCH Projection", key=f"mc_projection_{symbol}"):
+                with st.spinner("Running Monte Carlo / GARCH projection..."):
+                    simulations = monte_carlo_simulation(data)
+                    sim_df = pd.DataFrame(simulations).T
+                    sim_df.index = [data.index[-1] + timedelta(days=i) for i in range(len(sim_df))]
+                    fig_sim = px.line(sim_df, title="Price Projections")
+                    st.plotly_chart(fig_sim, use_container_width=True)
+            else:
+                st.caption("Optional advanced analysis. Skipped during scans.")
 
         # 2. TECHNICAL ANALYSIS TAB
         with tab_technical:
