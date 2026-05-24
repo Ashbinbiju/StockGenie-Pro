@@ -464,6 +464,8 @@ def fetch_stock_data_with_auth(symbol, period="2y", interval="1d"):
             start_date = end_date - timedelta(days=365)
         elif period == "1mo":
             start_date = end_date - timedelta(days=30)
+        elif period == "5d":
+            start_date = end_date - timedelta(days=5)
         else:
             start_date = end_date - timedelta(days=365)
 
@@ -568,7 +570,7 @@ def calculate_advance_decline_ratio(stock_list):
     declines = 0
     for symbol in stock_list:
         data = fetch_stock_data_cached(symbol)
-        if not data.empty:
+        if not data.empty and len(data) >= 2:
             if data['Close'].iloc[-1] > data['Close'].iloc[-2]:
                 advances += 1
             else:
@@ -1035,7 +1037,7 @@ def analyze_stock(data):
     return data
     
 def calculate_buy_at(data, patience="high"):
-    if data.empty or 'RSI' not in data.columns or data['RSI'].iloc[-1] is None:
+    if data.empty or 'RSI' not in data.columns or pd.isna(data['RSI'].iloc[-1]):
         st.warning("⚠️ Cannot calculate Buy At due to missing or invalid RSI data.")
         return None, "Unavailable"
     if 'ATR' in data.columns and pd.notnull(data['ATR'].iloc[-1]):
@@ -1124,8 +1126,8 @@ def calculate_stop_loss(data, atr_multiplier=1.5, entry_price=None):
     
     return round(stop_loss, 2)
 
-def calculate_target(data, risk_reward_ratio=3, entry_price=None):
-    stop_loss = calculate_stop_loss(data, entry_price=entry_price)
+def calculate_target(data, risk_reward_ratio=3, entry_price=None, stop_loss=None):
+    stop_loss = stop_loss if stop_loss is not None else calculate_stop_loss(data, entry_price=entry_price)
     if stop_loss is None:
         st.warning("⚠️ Cannot calculate Target due to missing Stop Loss data.")
         return None
@@ -1183,13 +1185,8 @@ def calculate_target_row(row, risk_reward_ratio=3):
     return None
 
 def fetch_fundamentals(symbol):
-    try:
-        smart_api = init_smartapi_client()
-        if not smart_api:
-            return {'P/E': float('inf'), 'EPS': 0, 'RevenueGrowth': 0}
-        return {'P/E': float('inf'), 'EPS': 0, 'RevenueGrowth': 0}
-    except Exception:
-        return {'P/E': float('inf'), 'EPS': 0, 'RevenueGrowth': 0}
+    # SmartAPI historical data does not provide fundamentals in this app.
+    return {'P/E': None, 'EPS': None, 'RevenueGrowth': None}
 
 # Improved strategy logic using adaptive regime detection, signal scoring, and volatility-aware filters
 
@@ -1219,8 +1216,8 @@ def compute_signal_score(data, symbol=None):
         'Fundamentals': 1.0
     }
 
-    # Volume filter: skip low volume days
-    if data['Volume'].iloc[-1] < data['Avg_Volume'].iloc[-1] * 0.5:
+    avg_volume = data['Avg_Volume'].iloc[-1] if 'Avg_Volume' in data.columns else None
+    if pd.notnull(avg_volume) and avg_volume > 0 and data['Volume'].iloc[-1] < avg_volume * 0.5:
         return -10  # Force no trade
 
     # RSI: Context-Aware Scoring (Momentum vs Mean Reversion)
@@ -1289,11 +1286,14 @@ def compute_signal_score(data, symbol=None):
     # Fundamentals
     if symbol:
         fundamentals = fetch_fundamentals(symbol)
-        if fundamentals['P/E'] < 15 and fundamentals['EPS'] > 0:
+        pe = fundamentals.get('P/E')
+        eps = fundamentals.get('EPS')
+        revenue_growth = fundamentals.get('RevenueGrowth')
+        if pd.notnull(pe) and pd.notnull(eps) and pe < 15 and eps > 0:
             score += weights['Fundamentals'] * 0.5
-        elif fundamentals['P/E'] > 30 or fundamentals['EPS'] < 0:
+        elif (pd.notnull(pe) and pe > 30) or (pd.notnull(eps) and eps < 0):
             score -= weights['Fundamentals'] * 0.5
-        if fundamentals['RevenueGrowth'] > 0.1:
+        if pd.notnull(revenue_growth) and revenue_growth > 0.1:
             score += weights['Fundamentals'] * 0.3
 
     return min(max(score, -10), 10)
@@ -1715,13 +1715,16 @@ def generate_recommendations(data, symbol=None):
 
         if symbol:
             fundamentals = fetch_fundamentals(symbol)
-            if fundamentals['P/E'] < 15 and fundamentals['EPS'] > 0:
+            pe = fundamentals.get('P/E')
+            eps = fundamentals.get('EPS')
+            revenue_growth = fundamentals.get('RevenueGrowth')
+            if pd.notnull(pe) and pd.notnull(eps) and pe < 15 and eps > 0:
                 buy_score += 2
-            elif fundamentals['P/E'] > 30 or fundamentals['EPS'] < 0:
+            elif (pd.notnull(pe) and pe > 30) or (pd.notnull(eps) and eps < 0):
                 sell_score += 1
-            if fundamentals['RevenueGrowth'] > 0.1:
+            if pd.notnull(revenue_growth) and revenue_growth > 0.1:
                 buy_score += 1
-            elif fundamentals['RevenueGrowth'] < 0:
+            elif pd.notnull(revenue_growth) and revenue_growth < 0:
                 sell_score += 0.5
 
         net_score = buy_score - sell_score
@@ -1747,8 +1750,16 @@ def generate_recommendations(data, symbol=None):
             recommendations["Long-Term"] = "Hold"
 
         recommendations["Buy At"], recommendations["Entry Type"] = calculate_buy_at(data)
-        recommendations["Stop Loss"] = calculate_stop_loss(data)
-        recommendations["Target"] = calculate_target(data)
+        if is_valid_price(recommendations["Buy At"]):
+            recommendations["Stop Loss"] = calculate_stop_loss(data, entry_price=recommendations["Buy At"])
+            recommendations["Target"] = calculate_target(
+                data,
+                entry_price=recommendations["Buy At"],
+                stop_loss=recommendations["Stop Loss"],
+            )
+        else:
+            recommendations["Stop Loss"] = None
+            recommendations["Target"] = None
 
         recommendations["Score"] = min(max(buy_score - sell_score, -7), 7)
     except Exception as e:
@@ -1769,18 +1780,12 @@ def get_top_sectors_cached(rate_limit_delay=2, stocks_per_sector=2):
             rec = generate_recommendations(data, symbol)
             total_score += rec.get("Score", 0)
             count += 1
-            rec = generate_recommendations(data, symbol)
-            total_score += rec.get("Score", 0)
-            count += 1
             # Rate limiting is handled globally now
-        avg_score = total_score / count if count else 0
-        sector_scores[sector] = avg_score
         avg_score = total_score / count if count else 0
         sector_scores[sector] = avg_score
         # Removed redundant sleep
     return sorted(sector_scores.items(), key=lambda x: x[1], reverse=True)[:3]
 
-@st.cache_data
 @st.cache_data(ttl=3600)
 def backtest_stock(data, symbol, strategy="Swing", _data_hash=None):
     results = {
@@ -1814,13 +1819,13 @@ def backtest_stock(data, symbol, strategy="Swing", _data_hash=None):
         current_price = data['Close'].iloc[i]
         current_date = data.index[i]
         
-        if signal == "Buy" and position is None:
+        if isinstance(signal, str) and "Buy" in signal and position is None:
             position = "Long"
             entry_price = current_price
             entry_date = current_date
             results["buy_signals"].append((current_date, current_price))
         
-        elif signal == "Sell" and position == "Long":
+        elif isinstance(signal, str) and "Sell" in signal and position == "Long":
             position = None
             profit = current_price - entry_price
             returns.append(profit / entry_price)
@@ -1834,6 +1839,20 @@ def backtest_stock(data, symbol, strategy="Swing", _data_hash=None):
             results["sell_signals"].append((current_date, current_price))
             entry_price = 0
             entry_date = None
+
+    if position == "Long" and entry_price:
+        current_price = data['Close'].iloc[-1]
+        current_date = data.index[-1]
+        profit = current_price - entry_price
+        returns.append(profit / entry_price)
+        trades.append({
+            "entry_date": entry_date,
+            "entry_price": entry_price,
+            "exit_date": current_date,
+            "exit_price": current_price,
+            "profit": profit
+        })
+        results["sell_signals"].append((current_date, current_price))
     
     if trades:
         results["trade_details"] = trades
@@ -1875,6 +1894,33 @@ def init_database():
             PRIMARY KEY (date, symbol)
         )
     ''')
+    expected_columns = {
+        "score": "REAL",
+        "current_price": "REAL",
+        "buy_at": "REAL",
+        "stop_loss": "REAL",
+        "target": "REAL",
+        "intraday": "TEXT",
+        "swing": "TEXT",
+        "short_term": "TEXT",
+        "long_term": "TEXT",
+        "mean_reversion": "TEXT",
+        "breakout": "TEXT",
+        "ichimoku_trend": "TEXT",
+        "recommendation": "TEXT",
+        "regime": "TEXT",
+        "position_size": "REAL",
+        "trailing_stop": "REAL",
+        "reason": "TEXT",
+        "pick_type": "TEXT",
+    }
+    existing_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(daily_picks)").fetchall()
+    }
+    for column, column_type in expected_columns.items():
+        if column not in existing_columns:
+            conn.execute(f"ALTER TABLE daily_picks ADD COLUMN {column} {column_type}")
+    conn.commit()
     conn.close()
 
 def insert_top_picks(results_df, pick_type="daily"):
@@ -1981,12 +2027,17 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
             if patience == "low" and rec.get("Current Price"):
                 rec["Buy At"], rec["Entry Type"] = calculate_buy_at(data, patience="low")
                 # RECALCULATE Risk Management based on new Entry!
-                if rec["Buy At"]:
+                if is_valid_price(rec["Buy At"]):
                     entry_type = rec["Entry Type"]
                     # Adjust SL Multiplier based on Entry Type (User Request)
                     sl_mult = 2.0 if entry_type == "Breakout" else 1.5
                     rec["Stop Loss"] = calculate_stop_loss(data, atr_multiplier=sl_mult, entry_price=rec["Buy At"])
-                    rec["Target"] = calculate_target(data, risk_reward_ratio=2.5, entry_price=rec["Buy At"]) # Realistic 2.5R
+                    rec["Target"] = calculate_target(
+                        data,
+                        risk_reward_ratio=2.5,
+                        entry_price=rec["Buy At"],
+                        stop_loss=rec["Stop Loss"],
+                    ) # Realistic 2.5R
             else:
                 rec["Entry Type"] = "Standard"
             
@@ -2012,7 +2063,6 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
                 "Position Size": rec.get("Position Size"),
                 "Trailing Stop": rec.get("Trailing Stop"),
                 "Entry Type": rec.get("Entry Type", "Standard"),
-                "Entry Type": rec.get("Entry Type", "Standard"),
                 "Reason": rec.get("Reason"),
                 "Pattern Notes": rec.get("Pattern Notes"), # Pass through
                 "Entry Strategy": rec.get("Entry Strategy"), # Pass through
@@ -2030,11 +2080,16 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
             if patience == "low" and rec.get("Current Price"):
                  rec["Buy At"], rec["Entry Type"] = calculate_buy_at(data, patience="low")
                  # RECALCULATE Risk Management based on new Entry!
-                 if rec["Buy At"]:
+                 if is_valid_price(rec["Buy At"]):
                     entry_type = rec.get("Entry Type", "Standard")
                     sl_mult = 2.0 if entry_type == "Breakout" else 1.5
                     rec["Stop Loss"] = calculate_stop_loss(data, atr_multiplier=sl_mult, entry_price=rec["Buy At"])
-                    rec["Target"] = calculate_target(data, risk_reward_ratio=2.5, entry_price=rec["Buy At"])
+                    rec["Target"] = calculate_target(
+                        data,
+                        risk_reward_ratio=2.5,
+                        entry_price=rec["Buy At"],
+                        stop_loss=rec["Stop Loss"],
+                    )
             else:
                  rec["Entry Type"] = "Standard"
 
@@ -2118,7 +2173,7 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
     # Sort logic for Top Picks
     recommendation_mode = st.session_state.get('recommendation_mode', 'Standard')
     if recommendation_mode == "Adaptive":
-        top_picks_df = success_df[success_df["Recommendation"].str.contains("Buy|Sell", na=False)]
+        top_picks_df = success_df[success_df["Recommendation"].str.contains("Buy", na=False)]
     else:
         buy_columns = ["Swing", "Short-Term", "Long-Term", "Breakout", "Ichimoku_Trend"]
         buy_signal = success_df[buy_columns].apply(
@@ -2130,67 +2185,6 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
     top_picks_df = top_picks_df.sort_values(by="Score", ascending=False).head(5)
     
     return top_picks_df, results_df
-
-def calculate_sector_performance():
-    """
-    Calculates the real-time performance of each sector based on constituent stocks.
-    Returns a DataFrame sorted by % Change.
-    """
-    try:
-        sector_performance = []
-        
-        # Flatten all symbols to fetch data in one batch
-        all_symbols = []
-        for sector, symbols in SECTORS.items():
-            all_symbols.extend(symbols)
-        all_symbols = list(set(all_symbols))
-        
-        # Helper to fetch change
-        live_data = {}
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_symbol = {executor.submit(fetch_stock_data, symbol, "5d"): symbol for symbol in all_symbols} # Fetch 5d for safety
-            for future in as_completed(future_to_symbol):
-                symbol = future_to_symbol[future]
-                try:
-                    data = future.result()
-                    if not data.empty and len(data) >= 2:
-                        current = data['Close'].iloc[-1]
-                        prev_close = data['Close'].iloc[-2]
-                        change = ((current - prev_close) / prev_close) * 100
-                        live_data[symbol] = change
-                except:
-                    pass
-
-        # Aggregate
-        for sector, symbols in SECTORS.items():
-            sector_changes = []
-            for symbol in symbols:
-                if symbol in live_data:
-                    sector_changes.append(live_data[symbol])
-            
-            if sector_changes:
-                avg_change = sum(sector_changes) / len(sector_changes)
-                # Sentiment Logic
-                if avg_change > 0.5: sentiment = "🟢 Strong"
-                elif avg_change > 0: sentiment = "🟢 Bullish"
-                elif avg_change < -0.5: sentiment = "🔴 Weak"
-                else: sentiment = "🔴 Bearish"
-                
-                sector_performance.append({
-                    "Sector": sector,
-                    "% Change": round(avg_change, 2),
-                    "Sentiment": sentiment
-                })
-        
-        if not sector_performance:
-            return pd.DataFrame()
-            
-        df = pd.DataFrame(sector_performance)
-        return df.sort_values(by="% Change", ascending=False)
-    except Exception as e:
-        logging.error(f"Sector Perf Error: {e}")
-        return pd.DataFrame()
-
 
 def calculate_sector_performance():
     """
@@ -2278,9 +2272,7 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
     if "Score" not in results_df.columns:
         results_df["Score"] = 0
         
-    # Filter out invalid 'Buy At' entries (e.g. from Choppy Markets)
-    if "Buy At" in results_df.columns:
-        results_df = results_df.dropna(subset=["Buy At"])
+    results_df = results_df[results_df["Buy At"].apply(is_valid_price)]
         
     recommendation_mode = st.session_state.get('recommendation_mode', 'Standard')
     if recommendation_mode == "Adaptive":
@@ -2794,11 +2786,6 @@ def main():
         help="Standard: Timeframe-specific recommendations. Adaptive: Regime-based with position sizing."
     )
     st.session_state.recommendation_mode = recommendation_mode
-
-    st.session_state.recommendation_mode = recommendation_mode
-
-
-
 
     if st.sidebar.button("Analyze Selected Stock"):
         if symbol:
