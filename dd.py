@@ -1749,6 +1749,9 @@ def generate_recommendations(data, symbol=None):
             recommendations["Short-Term"] = "Sell" if net_score <= -1 else "Hold"
             recommendations["Long-Term"] = "Hold"
 
+        if recommendations["Mean_Reversion"] == "Sell" and recommendations["Swing"] == "Buy":
+            buy_score = max(0, buy_score - 1)
+
         recommendations["Buy At"], recommendations["Entry Type"] = calculate_buy_at(data)
         if is_valid_price(recommendations["Buy At"]):
             recommendations["Stop Loss"] = calculate_stop_loss(data, entry_price=recommendations["Buy At"])
@@ -2159,7 +2162,7 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
     
     # Fill missing columns for consistent structure
     expected_cols = [
-        "Score", "Current Price", "Buy At", "Recommendation", "Intraday", "Swing",
+        "Score", "Current Price", "Buy At", "Stop Loss", "Target", "Recommendation", "Intraday", "Swing",
         "Short-Term", "Long-Term", "Breakout", "Ichimoku_Trend", "Status", "Error"
     ]
     for col in expected_cols:
@@ -2168,7 +2171,7 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
 
     # Filter for Top Picks (Success only)
     success_df = results_df[results_df["Status"] == "Success"].copy()
-    success_df = success_df[success_df["Buy At"].apply(is_valid_price)]
+    success_df = success_df[success_df.apply(is_actionable_entry, axis=1)]
 
     # Sort logic for Top Picks
     recommendation_mode = st.session_state.get('recommendation_mode', 'Standard')
@@ -2264,7 +2267,7 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
         return pd.DataFrame()
     
     # Ensure all required columns exist to avoid KeyError
-    expected_cols = ["Score", "Current Price", "Intraday", "Recommendation", "Buy At"]
+    expected_cols = ["Score", "Current Price", "Intraday", "Recommendation", "Buy At", "Stop Loss", "Target"]
     for col in expected_cols:
         if col not in results_df.columns:
             results_df[col] = None 
@@ -2272,7 +2275,7 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
     if "Score" not in results_df.columns:
         results_df["Score"] = 0
         
-    results_df = results_df[results_df["Buy At"].apply(is_valid_price)]
+    results_df = results_df[results_df.apply(is_actionable_entry, axis=1)]
         
     recommendation_mode = st.session_state.get('recommendation_mode', 'Standard')
     if recommendation_mode == "Adaptive":
@@ -2305,6 +2308,27 @@ def is_valid_price(value):
         return float(value) > 0
     except (TypeError, ValueError):
         return False
+
+def to_float_or_none(value):
+    if isinstance(value, tuple):
+        value = value[0]
+    if not is_valid_price(value):
+        return None
+    return float(value)
+
+def is_actionable_entry(row, max_distance_pct=0.08):
+    current_price = to_float_or_none(row.get("Current Price"))
+    buy_at = to_float_or_none(row.get("Buy At"))
+    stop_loss = to_float_or_none(row.get("Stop Loss"))
+    target = to_float_or_none(row.get("Target"))
+    if not all([current_price, buy_at, stop_loss, target]):
+        return False
+    distance_pct = abs(buy_at - current_price) / current_price
+    return (
+        buy_at > stop_loss
+        and target > buy_at
+        and distance_pct <= max_distance_pct
+    )
 
 def format_currency(value):
     if isinstance(value, tuple):
