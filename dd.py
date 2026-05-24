@@ -29,14 +29,29 @@ from streamlit import cache_data
 
 load_dotenv()
 
-def get_config_value(name):
-    value = os.getenv(name)
-    if value:
-        return value
+def get_config_value(*names):
+    secret_sections = ("angelone", "smartapi", "smart_api", "broker")
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value.strip() if isinstance(value, str) else value
+
     try:
-        return st.secrets.get(name)
+        for name in names:
+            value = st.secrets.get(name)
+            if value:
+                return value.strip() if isinstance(value, str) else value
+
+        for section in secret_sections:
+            values = st.secrets.get(section, {})
+            for name in names:
+                value = values.get(name) if hasattr(values, "get") else None
+                if value:
+                    return value.strip() if isinstance(value, str) else value
     except Exception:
-        return None
+        pass
+
+    return None
 
 @st.cache_data(ttl=86400)
 def load_symbol_token_map():
@@ -62,14 +77,14 @@ logging.getLogger().addFilter(ContextWarningFilter())
 # Also try to hush the specific logger used by Streamlit runner
 logging.getLogger("streamlit.runtime.scriptrunner.script_runner").addFilter(ContextWarningFilter())
 
-CLIENT_ID = get_config_value("CLIENT_ID")
-PASSWORD = get_config_value("PASSWORD")
-TOTP_SECRET = get_config_value("TOTP_SECRET")
-HISTORICAL_API_KEY = get_config_value("HISTORICAL_API_KEY") or get_config_value("TRADING_API_KEY")
+CLIENT_ID = get_config_value("CLIENT_ID", "ANGEL_CLIENT_ID", "client_id")
+PASSWORD = get_config_value("PASSWORD", "PIN", "MPIN", "password")
+TOTP_SECRET = get_config_value("TOTP_SECRET", "TOTP", "totp_secret", "totp")
+HISTORICAL_API_KEY = get_config_value("HISTORICAL_API_KEY", "TRADING_API_KEY", "API_KEY", "api_key")
 API_KEYS = {
     "Historical": HISTORICAL_API_KEY,
-    "Trading": get_config_value("TRADING_API_KEY"),
-    "Market": get_config_value("MARKET_API_KEY")
+    "Trading": get_config_value("TRADING_API_KEY", "API_KEY", "api_key"),
+    "Market": get_config_value("MARKET_API_KEY", "market_api_key")
 }
 
 USER_AGENTS = [
@@ -286,17 +301,17 @@ SECTORS = {
 }
 
 @st.cache_resource(ttl=86400)
-def get_smartapi_session():
+def get_smartapi_session(api_key, client_id, password, totp_secret):
     """
     Initializes and caches the SmartAPI session to avoid repeated logins.
     Logins are limited to 1 per second, but we should only need one per day/session.
     """
     missing = [
         name for name, value in {
-            "CLIENT_ID": CLIENT_ID,
-            "PASSWORD": PASSWORD,
-            "TOTP_SECRET": TOTP_SECRET,
-            "HISTORICAL_API_KEY": API_KEYS["Historical"],
+            "CLIENT_ID": client_id,
+            "PASSWORD": password,
+            "TOTP_SECRET": totp_secret,
+            "HISTORICAL_API_KEY": api_key,
         }.items()
         if not value
     ]
@@ -305,9 +320,9 @@ def get_smartapi_session():
         return None
 
     try:
-        smart_api = SmartConnect(api_key=API_KEYS["Historical"])
-        totp = pyotp.TOTP(TOTP_SECRET)
-        data = smart_api.generateSession(CLIENT_ID, PASSWORD, totp.now())
+        smart_api = SmartConnect(api_key=api_key)
+        totp = pyotp.TOTP(totp_secret)
+        data = smart_api.generateSession(client_id, password, totp.now())
         if data and isinstance(data, dict) and data.get('status'):
             clear_smartapi_auth_error()
             return smart_api
@@ -417,11 +432,11 @@ def fetch_stock_data_with_auth(symbol, period="2y", interval="1d"):
             symbol = f"{symbol.split('.')[0]}-EQ"
 
         # Use the cached session instead of creating a new one every time
-        smart_api = get_smartapi_session()
+        smart_api = get_smartapi_session(API_KEYS["Historical"], CLIENT_ID, PASSWORD, TOTP_SECRET)
         if not smart_api:
             # If session failed, try to re-initialize once (maybe expired)
             st.cache_resource.clear()
-            smart_api = get_smartapi_session()
+            smart_api = get_smartapi_session(API_KEYS["Historical"], CLIENT_ID, PASSWORD, TOTP_SECRET)
             if not smart_api:
                  raise ValueError("SmartAPI client initialization failed")
 
@@ -485,7 +500,7 @@ def fetch_stock_data_with_auth(symbol, period="2y", interval="1d"):
                 elif historical_data and isinstance(historical_data, dict) and historical_data.get('errorCode') == 'AG8001':
                     logging.warning(f"⚠️ Invalid Token for {symbol} (AG8001). Clearing cache & re-logging in...")
                     st.cache_resource.clear() # Clear cached session
-                    smart_api = get_smartapi_session() # Get fresh session
+                    smart_api = get_smartapi_session(API_KEYS["Historical"], CLIENT_ID, PASSWORD, TOTP_SECRET) # Get fresh session
                     time.sleep(1) # Slight pause before retry
                     continue # Retry loop with new session
 
