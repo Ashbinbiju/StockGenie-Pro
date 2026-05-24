@@ -29,6 +29,15 @@ from streamlit import cache_data
 
 load_dotenv()
 
+def get_config_value(name):
+    value = os.getenv(name)
+    if value:
+        return value
+    try:
+        return st.secrets.get(name)
+    except Exception:
+        return None
+
 @st.cache_data(ttl=86400)
 def load_symbol_token_map():
     try:
@@ -53,14 +62,14 @@ logging.getLogger().addFilter(ContextWarningFilter())
 # Also try to hush the specific logger used by Streamlit runner
 logging.getLogger("streamlit.runtime.scriptrunner.script_runner").addFilter(ContextWarningFilter())
 
-CLIENT_ID = os.getenv("CLIENT_ID")
-PASSWORD = os.getenv("PASSWORD")
-TOTP_SECRET = os.getenv("TOTP_SECRET")
-HISTORICAL_API_KEY = os.getenv("HISTORICAL_API_KEY") or os.getenv("TRADING_API_KEY")
+CLIENT_ID = get_config_value("CLIENT_ID")
+PASSWORD = get_config_value("PASSWORD")
+TOTP_SECRET = get_config_value("TOTP_SECRET")
+HISTORICAL_API_KEY = get_config_value("HISTORICAL_API_KEY") or get_config_value("TRADING_API_KEY")
 API_KEYS = {
     "Historical": HISTORICAL_API_KEY,
-    "Trading": os.getenv("TRADING_API_KEY"),
-    "Market": os.getenv("MARKET_API_KEY")
+    "Trading": get_config_value("TRADING_API_KEY"),
+    "Market": get_config_value("MARKET_API_KEY")
 }
 
 USER_AGENTS = [
@@ -292,22 +301,25 @@ def get_smartapi_session():
         if not value
     ]
     if missing:
-        st.error(f"SmartAPI credentials missing in .env: {', '.join(missing)}")
+        st.error(f"SmartAPI credentials missing in .env or Streamlit secrets: {', '.join(missing)}")
         return None
 
     try:
         smart_api = SmartConnect(api_key=API_KEYS["Historical"])
         totp = pyotp.TOTP(TOTP_SECRET)
         data = smart_api.generateSession(CLIENT_ID, PASSWORD, totp.now())
-        if data.get('status'):
+        if data and isinstance(data, dict) and data.get('status'):
             clear_smartapi_auth_error()
             return smart_api
-        else:
+        elif isinstance(data, dict):
             message = data.get('message', 'Unknown authentication error')
             error_code = data.get('errorCode') or data.get('errorcode')
             if error_code:
                 message = f"{message} ({error_code})"
             st.error(f"SmartAPI authentication failed: {message}")
+            return None
+        else:
+            st.error("SmartAPI authentication failed: generateSession returned an empty or invalid response")
             return None
     except Exception as e:
         st.error(f"Error initializing SmartAPI: {str(e)}")
