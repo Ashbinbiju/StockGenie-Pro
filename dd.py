@@ -117,6 +117,13 @@ smartapi_auth_error = None
 smartapi_auth_lock = threading.Lock()
 NIFTY_50_TOKEN = "99926000"
 MIN_TOP_PICK_SCORE = 5
+RANKING_WEIGHTS = {
+    "relative_strength": 0.35,
+    "rvol": 0.25,
+    "sector": 0.20,
+    "liquidity": 0.10,
+    "entry": 0.10,
+}
 
 TOOLTIPS = {
     "RSI": "Relative Strength Index (30=Oversold, 70=Overbought)",
@@ -2473,8 +2480,12 @@ def sector_momentum_adjustment(sector_perf):
     sector_perf = to_number_or_none(sector_perf)
     if sector_perf is None:
         return 0.0
+    if sector_perf > 4:
+        return 2.0
     if sector_perf > 2:
         return 1.5
+    if sector_perf > 1:
+        return 1.0
     if sector_perf < -1:
         return -1.0
     return 0.0
@@ -2581,13 +2592,11 @@ def add_entry_quality_columns(df, sector_momentum=None, nifty_5d_return=0.0):
     ranked_df["Liquidity Score"] = ranked_df["Avg Volume Value"].apply(liquidity_adjustment)
     ranked_df["RVOL Score"] = ranked_df["RVOL"].apply(rvol_adjustment)
     ranked_df["Ranking Score"] = (
-        ranked_df["Score"]
-        + ranked_df["Entry Quality"]
-        + ranked_df["Sector Momentum Score"]
-        + ranked_df["Relative Strength Score"]
-        + ranked_df["Entry Distance Score"]
-        + ranked_df["Liquidity Score"]
-        + ranked_df["RVOL Score"]
+        (ranked_df["Relative Strength Score"] * RANKING_WEIGHTS["relative_strength"])
+        + (ranked_df["RVOL Score"] * RANKING_WEIGHTS["rvol"])
+        + (ranked_df["Sector Momentum Score"] * RANKING_WEIGHTS["sector"])
+        + (ranked_df["Liquidity Score"] * RANKING_WEIGHTS["liquidity"])
+        + (ranked_df["Entry Distance Score"] * RANKING_WEIGHTS["entry"])
     )
     return ranked_df
 
