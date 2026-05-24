@@ -115,6 +115,7 @@ USER_AGENTS = [
 cache = Cache("stock_data_cache")
 smartapi_auth_error = None
 smartapi_auth_lock = threading.Lock()
+NIFTY_50_TOKEN = "99926000"
 
 TOOLTIPS = {
     "RSI": "Relative Strength Index (30=Oversold, 70=Overbought)",
@@ -564,6 +565,39 @@ def fetch_stock_data_with_auth(symbol, period="2y", interval="1d"):
 @lru_cache(maxsize=1000)
 def fetch_stock_data_cached(symbol, period="2y", interval="1d"):
     return fetch_stock_data_with_auth(symbol, period, interval)
+
+@st.cache_data(ttl=1800)
+def fetch_nifty_5d_return():
+    try:
+        auth_error = get_smartapi_auth_error()
+        if auth_error:
+            logging.warning(f"Skipping NIFTY benchmark request: {auth_error}")
+            return 0.0
+
+        smart_api = get_smartapi_session(API_KEYS["Historical"], CLIENT_ID, PASSWORD, TOTP_SECRET)
+        if not smart_api:
+            return 0.0
+
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=10)
+        enforce_rate_limit()
+        historical_data = smart_api.getCandleData({
+            "exchange": "NSE",
+            "symboltoken": NIFTY_50_TOKEN,
+            "interval": "ONE_DAY",
+            "fromdate": start_date.strftime("%Y-%m-%d %H:%M"),
+            "todate": end_date.strftime("%Y-%m-%d %H:%M")
+        })
+
+        if not historical_data or not isinstance(historical_data, dict) or not historical_data.get("data"):
+            return 0.0
+
+        data = pd.DataFrame(historical_data["data"], columns=["Date", "Open", "High", "Low", "Close", "Volume"])
+        return_value = calculate_recent_return(data, candles=5)
+        return 0.0 if pd.isna(return_value) else float(return_value)
+    except Exception as e:
+        logging.warning(f"Failed to compute NIFTY relative-strength benchmark: {str(e)}")
+        return 0.0
 
 def calculate_advance_decline_ratio(stock_list):
     advances = 0
@@ -2178,6 +2212,7 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
     # Filter for Top Picks (Success only)
     success_df = results_df[results_df["Status"] == "Success"].copy()
     sector_momentum = calculate_sector_momentum_map(success_df)
+    nifty_5d_return = fetch_nifty_5d_return()
     success_df = success_df[success_df.apply(is_actionable_entry, axis=1)]
 
     # Sort logic for Top Picks
@@ -2192,7 +2227,7 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
         )
         top_picks_df = success_df[buy_signal]
 
-    top_picks_df = add_entry_quality_columns(top_picks_df, sector_momentum)
+    top_picks_df = add_entry_quality_columns(top_picks_df, sector_momentum, nifty_5d_return)
     top_picks_df = top_picks_df.sort_values(
         by=["Ranking Score", "Reward/Risk", "Score"],
         ascending=[False, False, False]
@@ -2293,6 +2328,7 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
         results_df["Score"] = 0
 
     sector_momentum = calculate_sector_momentum_map(results_df)
+    nifty_5d_return = fetch_nifty_5d_return()
     results_df = results_df[results_df.apply(is_actionable_entry, axis=1)]
         
     recommendation_mode = st.session_state.get('recommendation_mode', 'Standard')
@@ -2300,7 +2336,7 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
         results_df = results_df[results_df["Recommendation"].str.contains("Buy", na=False)]
     else:
         results_df = results_df[results_df["Intraday"].str.contains("Buy", na=False)]
-    results_df = add_entry_quality_columns(results_df, sector_momentum)
+    results_df = add_entry_quality_columns(results_df, sector_momentum, nifty_5d_return)
     results_df = results_df.sort_values(
         by=["Ranking Score", "Reward/Risk", "Score"],
         ascending=[False, False, False]
@@ -2338,6 +2374,21 @@ def to_float_or_none(value):
     if not is_valid_price(value):
         return None
     return float(value)
+
+def to_number_or_none(value):
+    if isinstance(value, tuple):
+        value = value[0]
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except TypeError:
+        pass
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 def calculate_recent_return(data, candles=5):
     if data.empty or "Close" not in data.columns or len(data) < 2:
@@ -2391,13 +2442,25 @@ def calculate_sector_momentum_map(df):
     return momentum_df.groupby("Sector")["Recent Return"].mean().to_dict()
 
 def sector_momentum_adjustment(sector_perf):
-    sector_perf = to_float_or_none(sector_perf)
+    sector_perf = to_number_or_none(sector_perf)
     if sector_perf is None:
         return 0.0
     if sector_perf > 2:
         return 1.5
     if sector_perf < -1:
         return -1.0
+    return 0.0
+
+def relative_strength_adjustment(relative_strength):
+    relative_strength = to_number_or_none(relative_strength)
+    if relative_strength is None:
+        return 0.0
+    if relative_strength > 3:
+        return 2.0
+    if relative_strength > 1:
+        return 1.0
+    if relative_strength < -2:
+        return -2.0
     return 0.0
 
 def calculate_entry_metrics(row, max_distance_pct=0.08):
@@ -2425,8 +2488,9 @@ def calculate_entry_metrics(row, max_distance_pct=0.08):
         "Entry Quality": entry_quality
     })
 
-def add_entry_quality_columns(df, sector_momentum=None):
+def add_entry_quality_columns(df, sector_momentum=None, nifty_5d_return=0.0):
     sector_momentum = sector_momentum or {}
+    nifty_5d_return = to_number_or_none(nifty_5d_return) or 0.0
     ranked_df = df.copy()
     if "Symbol" not in ranked_df.columns:
         ranked_df["Symbol"] = None
@@ -2436,6 +2500,8 @@ def add_entry_quality_columns(df, sector_momentum=None):
         ranked_df["Entry Quality"] = 0.0
         ranked_df["Sector Performance %"] = np.nan
         ranked_df["Sector Momentum Score"] = 0.0
+        ranked_df["Relative Strength"] = np.nan
+        ranked_df["Relative Strength Score"] = 0.0
         ranked_df["Ranking Score"] = pd.Series(dtype=float)
         ranked_df["Sector"] = pd.Series(dtype=object)
         return ranked_df
@@ -2445,10 +2511,14 @@ def add_entry_quality_columns(df, sector_momentum=None):
     ranked_df["Sector"] = ranked_df["Symbol"].apply(get_stock_sector)
     ranked_df["Sector Performance %"] = ranked_df["Sector"].map(sector_momentum).fillna(0.0)
     ranked_df["Sector Momentum Score"] = ranked_df["Sector Performance %"].apply(sector_momentum_adjustment)
+    ranked_df["Recent Return"] = pd.to_numeric(ranked_df["Recent Return"], errors="coerce")
+    ranked_df["Relative Strength"] = ranked_df["Recent Return"] - nifty_5d_return
+    ranked_df["Relative Strength Score"] = ranked_df["Relative Strength"].apply(relative_strength_adjustment)
     ranked_df["Ranking Score"] = (
         ranked_df["Score"]
         + ranked_df["Entry Quality"]
         + ranked_df["Sector Momentum Score"]
+        + ranked_df["Relative Strength Score"]
     )
     return ranked_df
 
