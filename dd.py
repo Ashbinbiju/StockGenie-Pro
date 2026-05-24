@@ -2059,6 +2059,7 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
         
         data = analyze_stock(data, interval=interval)
         recent_return = calculate_recent_return(data)
+        rvol, avg_volume_value = calculate_volume_metrics(data)
         logging.info(f"Analyzing {symbol} in {recommendation_mode} mode")
         
         if recommendation_mode == "Adaptive":
@@ -2095,6 +2096,8 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
                 "Status": "Success",
                 "Current Price": rec.get("Current Price"),
                 "Recent Return": recent_return,
+                "RVOL": rvol,
+                "Avg Volume Value": avg_volume_value,
                 "Buy At": rec.get("Buy At"),
                 "Stop Loss": rec.get("Stop Loss"),
                 "Target": rec.get("Target"),
@@ -2150,6 +2153,8 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
                 "Status": "Success",
                 "Current Price": rec.get("Current Price"),
                 "Recent Return": recent_return,
+                "RVOL": rvol,
+                "Avg Volume Value": avg_volume_value,
                 "Buy At": rec.get("Buy At"),
                 "Stop Loss": rec.get("Stop Loss"),
                 "Target": rec.get("Target"),
@@ -2201,9 +2206,9 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
     
     # Fill missing columns for consistent structure
     expected_cols = [
-        "Symbol", "Score", "Current Price", "Recent Return", "Buy At", "Stop Loss", "Target",
-        "Recommendation", "Intraday", "Swing", "Short-Term", "Long-Term", "Mean_Reversion",
-        "Breakout", "Ichimoku_Trend", "Status", "Error"
+        "Symbol", "Score", "Current Price", "Recent Return", "RVOL", "Avg Volume Value",
+        "Buy At", "Stop Loss", "Target", "Recommendation", "Intraday", "Swing", "Short-Term",
+        "Long-Term", "Mean_Reversion", "Breakout", "Ichimoku_Trend", "Status", "Error"
     ]
     for col in expected_cols:
          if col not in results_df.columns:
@@ -2317,8 +2322,8 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
     
     # Ensure all required columns exist to avoid KeyError
     expected_cols = [
-        "Symbol", "Score", "Current Price", "Recent Return", "Intraday", "Recommendation",
-        "Buy At", "Stop Loss", "Target"
+        "Symbol", "Score", "Current Price", "Recent Return", "RVOL", "Avg Volume Value",
+        "Intraday", "Recommendation", "Buy At", "Stop Loss", "Target"
     ]
     for col in expected_cols:
         if col not in results_df.columns:
@@ -2400,6 +2405,24 @@ def calculate_recent_return(data, candles=5):
         return np.nan
     return ((last_close - first_close) / first_close) * 100
 
+def calculate_volume_metrics(data):
+    if data.empty or not {"Close", "Volume"}.issubset(data.columns):
+        return np.nan, np.nan
+
+    current_close = to_float_or_none(data["Close"].iloc[-1])
+    current_volume = to_float_or_none(data["Volume"].iloc[-1])
+    if not current_close or not current_volume:
+        return np.nan, np.nan
+
+    if "Avg_Volume" in data.columns:
+        avg_volume = to_float_or_none(data["Avg_Volume"].iloc[-1])
+    else:
+        avg_volume = to_float_or_none(data["Volume"].tail(10).mean())
+
+    rvol = current_volume / avg_volume if avg_volume else np.nan
+    avg_volume_value = avg_volume * current_close if avg_volume else np.nan
+    return rvol, avg_volume_value
+
 def is_actionable_entry(row, max_distance_pct=0.08, min_reward_risk=1.8):
     current_price = to_float_or_none(row.get("Current Price"))
     buy_at = to_float_or_none(row.get("Buy At"))
@@ -2463,6 +2486,36 @@ def relative_strength_adjustment(relative_strength):
         return -2.0
     return 0.0
 
+def entry_distance_adjustment(distance_pct):
+    distance_pct = to_number_or_none(distance_pct)
+    if distance_pct is None:
+        return 0.0
+    if distance_pct < 2:
+        return 1.0
+    if distance_pct > 5:
+        return -1.0
+    return 0.0
+
+def liquidity_adjustment(avg_volume_value):
+    avg_volume_value = to_number_or_none(avg_volume_value)
+    if avg_volume_value is None:
+        return 0.0
+    if avg_volume_value > 50_000_000:
+        return 1.0
+    if avg_volume_value < 10_000_000:
+        return -1.0
+    return 0.0
+
+def rvol_adjustment(rvol):
+    rvol = to_number_or_none(rvol)
+    if rvol is None:
+        return 0.0
+    if rvol > 2:
+        return 2.0
+    if rvol > 1.5:
+        return 1.0
+    return 0.0
+
 def calculate_entry_metrics(row, max_distance_pct=0.08):
     current_price = to_float_or_none(row.get("Current Price"))
     buy_at = to_float_or_none(row.get("Buy At"))
@@ -2502,6 +2555,9 @@ def add_entry_quality_columns(df, sector_momentum=None, nifty_5d_return=0.0):
         ranked_df["Sector Momentum Score"] = 0.0
         ranked_df["Relative Strength"] = np.nan
         ranked_df["Relative Strength Score"] = 0.0
+        ranked_df["Entry Distance Score"] = 0.0
+        ranked_df["Liquidity Score"] = 0.0
+        ranked_df["RVOL Score"] = 0.0
         ranked_df["Ranking Score"] = pd.Series(dtype=float)
         ranked_df["Sector"] = pd.Series(dtype=object)
         return ranked_df
@@ -2514,11 +2570,19 @@ def add_entry_quality_columns(df, sector_momentum=None, nifty_5d_return=0.0):
     ranked_df["Recent Return"] = pd.to_numeric(ranked_df["Recent Return"], errors="coerce")
     ranked_df["Relative Strength"] = ranked_df["Recent Return"] - nifty_5d_return
     ranked_df["Relative Strength Score"] = ranked_df["Relative Strength"].apply(relative_strength_adjustment)
+    ranked_df["RVOL"] = pd.to_numeric(ranked_df["RVOL"], errors="coerce")
+    ranked_df["Avg Volume Value"] = pd.to_numeric(ranked_df["Avg Volume Value"], errors="coerce")
+    ranked_df["Entry Distance Score"] = ranked_df["Entry Distance %"].apply(entry_distance_adjustment)
+    ranked_df["Liquidity Score"] = ranked_df["Avg Volume Value"].apply(liquidity_adjustment)
+    ranked_df["RVOL Score"] = ranked_df["RVOL"].apply(rvol_adjustment)
     ranked_df["Ranking Score"] = (
         ranked_df["Score"]
         + ranked_df["Entry Quality"]
         + ranked_df["Sector Momentum Score"]
         + ranked_df["Relative Strength Score"]
+        + ranked_df["Entry Distance Score"]
+        + ranked_df["Liquidity Score"]
+        + ranked_df["RVOL Score"]
     )
     return ranked_df
 
