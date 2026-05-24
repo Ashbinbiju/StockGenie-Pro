@@ -2024,6 +2024,7 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
             }
         
         data = analyze_stock(data, interval=interval)
+        recent_return = calculate_recent_return(data)
         logging.info(f"Analyzing {symbol} in {recommendation_mode} mode")
         
         if recommendation_mode == "Adaptive":
@@ -2059,6 +2060,7 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
                 "Symbol": symbol,
                 "Status": "Success",
                 "Current Price": rec.get("Current Price"),
+                "Recent Return": recent_return,
                 "Buy At": rec.get("Buy At"),
                 "Stop Loss": rec.get("Stop Loss"),
                 "Target": rec.get("Target"),
@@ -2113,6 +2115,7 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
                 "Symbol": symbol,
                 "Status": "Success",
                 "Current Price": rec.get("Current Price"),
+                "Recent Return": recent_return,
                 "Buy At": rec.get("Buy At"),
                 "Stop Loss": rec.get("Stop Loss"),
                 "Target": rec.get("Target"),
@@ -2164,9 +2167,9 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
     
     # Fill missing columns for consistent structure
     expected_cols = [
-        "Symbol", "Score", "Current Price", "Buy At", "Stop Loss", "Target", "Recommendation",
-        "Intraday", "Swing", "Short-Term", "Long-Term", "Mean_Reversion", "Breakout",
-        "Ichimoku_Trend", "Status", "Error"
+        "Symbol", "Score", "Current Price", "Recent Return", "Buy At", "Stop Loss", "Target",
+        "Recommendation", "Intraday", "Swing", "Short-Term", "Long-Term", "Mean_Reversion",
+        "Breakout", "Ichimoku_Trend", "Status", "Error"
     ]
     for col in expected_cols:
          if col not in results_df.columns:
@@ -2174,6 +2177,7 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
 
     # Filter for Top Picks (Success only)
     success_df = results_df[results_df["Status"] == "Success"].copy()
+    sector_momentum = calculate_sector_momentum_map(success_df)
     success_df = success_df[success_df.apply(is_actionable_entry, axis=1)]
 
     # Sort logic for Top Picks
@@ -2188,7 +2192,7 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
         )
         top_picks_df = success_df[buy_signal]
 
-    top_picks_df = add_entry_quality_columns(top_picks_df)
+    top_picks_df = add_entry_quality_columns(top_picks_df, sector_momentum)
     top_picks_df = top_picks_df.sort_values(
         by=["Ranking Score", "Reward/Risk", "Score"],
         ascending=[False, False, False]
@@ -2278,7 +2282,7 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
     
     # Ensure all required columns exist to avoid KeyError
     expected_cols = [
-        "Symbol", "Score", "Current Price", "Intraday", "Recommendation",
+        "Symbol", "Score", "Current Price", "Recent Return", "Intraday", "Recommendation",
         "Buy At", "Stop Loss", "Target"
     ]
     for col in expected_cols:
@@ -2287,7 +2291,8 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
 
     if "Score" not in results_df.columns:
         results_df["Score"] = 0
-        
+
+    sector_momentum = calculate_sector_momentum_map(results_df)
     results_df = results_df[results_df.apply(is_actionable_entry, axis=1)]
         
     recommendation_mode = st.session_state.get('recommendation_mode', 'Standard')
@@ -2295,7 +2300,7 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
         results_df = results_df[results_df["Recommendation"].str.contains("Buy", na=False)]
     else:
         results_df = results_df[results_df["Intraday"].str.contains("Buy", na=False)]
-    results_df = add_entry_quality_columns(results_df)
+    results_df = add_entry_quality_columns(results_df, sector_momentum)
     results_df = results_df.sort_values(
         by=["Ranking Score", "Reward/Risk", "Score"],
         ascending=[False, False, False]
@@ -2334,6 +2339,16 @@ def to_float_or_none(value):
         return None
     return float(value)
 
+def calculate_recent_return(data, candles=5):
+    if data.empty or "Close" not in data.columns or len(data) < 2:
+        return np.nan
+    window = data.tail(candles)
+    first_close = to_float_or_none(window["Close"].iloc[0])
+    last_close = to_float_or_none(window["Close"].iloc[-1])
+    if not first_close or not last_close:
+        return np.nan
+    return ((last_close - first_close) / first_close) * 100
+
 def is_actionable_entry(row, max_distance_pct=0.08, min_reward_risk=1.8):
     current_price = to_float_or_none(row.get("Current Price"))
     buy_at = to_float_or_none(row.get("Buy At"))
@@ -2363,6 +2378,28 @@ def get_stock_sector(symbol):
             return sector
     return "Other"
 
+def calculate_sector_momentum_map(df):
+    if df.empty or "Recent Return" not in df.columns:
+        return {}
+    momentum_df = df.copy()
+    if "Sector" not in momentum_df.columns:
+        momentum_df["Sector"] = momentum_df["Symbol"].apply(get_stock_sector)
+    momentum_df["Recent Return"] = pd.to_numeric(momentum_df["Recent Return"], errors="coerce")
+    momentum_df = momentum_df.dropna(subset=["Recent Return"])
+    if momentum_df.empty:
+        return {}
+    return momentum_df.groupby("Sector")["Recent Return"].mean().to_dict()
+
+def sector_momentum_adjustment(sector_perf):
+    sector_perf = to_float_or_none(sector_perf)
+    if sector_perf is None:
+        return 0.0
+    if sector_perf > 2:
+        return 1.5
+    if sector_perf < -1:
+        return -1.0
+    return 0.0
+
 def calculate_entry_metrics(row, max_distance_pct=0.08):
     current_price = to_float_or_none(row.get("Current Price"))
     buy_at = to_float_or_none(row.get("Buy At"))
@@ -2388,7 +2425,8 @@ def calculate_entry_metrics(row, max_distance_pct=0.08):
         "Entry Quality": entry_quality
     })
 
-def add_entry_quality_columns(df):
+def add_entry_quality_columns(df, sector_momentum=None):
+    sector_momentum = sector_momentum or {}
     ranked_df = df.copy()
     if "Symbol" not in ranked_df.columns:
         ranked_df["Symbol"] = None
@@ -2396,14 +2434,22 @@ def add_entry_quality_columns(df):
         ranked_df["Entry Distance %"] = np.nan
         ranked_df["Reward/Risk"] = np.nan
         ranked_df["Entry Quality"] = 0.0
+        ranked_df["Sector Performance %"] = np.nan
+        ranked_df["Sector Momentum Score"] = 0.0
         ranked_df["Ranking Score"] = pd.Series(dtype=float)
         ranked_df["Sector"] = pd.Series(dtype=object)
         return ranked_df
     metrics = ranked_df.apply(calculate_entry_metrics, axis=1)
     ranked_df = pd.concat([ranked_df, metrics], axis=1)
     ranked_df["Score"] = pd.to_numeric(ranked_df["Score"], errors="coerce").fillna(0)
-    ranked_df["Ranking Score"] = ranked_df["Score"] + ranked_df["Entry Quality"]
     ranked_df["Sector"] = ranked_df["Symbol"].apply(get_stock_sector)
+    ranked_df["Sector Performance %"] = ranked_df["Sector"].map(sector_momentum).fillna(0.0)
+    ranked_df["Sector Momentum Score"] = ranked_df["Sector Performance %"].apply(sector_momentum_adjustment)
+    ranked_df["Ranking Score"] = (
+        ranked_df["Score"]
+        + ranked_df["Entry Quality"]
+        + ranked_df["Sector Momentum Score"]
+    )
     return ranked_df
 
 def limit_top_picks_by_sector(df, max_per_sector=2, limit=5):
