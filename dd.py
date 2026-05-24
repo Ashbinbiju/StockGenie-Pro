@@ -1033,7 +1033,7 @@ def analyze_stock(data):
 def calculate_buy_at(data, patience="high"):
     if data.empty or 'RSI' not in data.columns or data['RSI'].iloc[-1] is None:
         st.warning("⚠️ Cannot calculate Buy At due to missing or invalid RSI data.")
-        return None
+        return None, "Unavailable"
     if 'ATR' in data.columns and pd.notnull(data['ATR'].iloc[-1]):
         current_close = data['Close'].iloc[-1]
         atr = data['ATR'].iloc[-1]
@@ -1742,7 +1742,7 @@ def generate_recommendations(data, symbol=None):
             recommendations["Short-Term"] = "Sell" if net_score <= -1 else "Hold"
             recommendations["Long-Term"] = "Hold"
 
-        recommendations["Buy At"] = calculate_buy_at(data)
+        recommendations["Buy At"], recommendations["Entry Type"] = calculate_buy_at(data)
         recommendations["Stop Loss"] = calculate_stop_loss(data)
         recommendations["Target"] = calculate_target(data)
 
@@ -2541,6 +2541,9 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
             with col2:
                 buy_at = recommendations.get('Buy At', 'N/A')
                 entry_type = recommendations.get('Entry Type', 'Standard')
+                if isinstance(buy_at, tuple):
+                    buy_at, tuple_entry_type = buy_at
+                    entry_type = tuple_entry_type or entry_type
                 label = "Buy At"
                 if entry_type == "Breakout":
                     label = "🟢 Buy Above"
