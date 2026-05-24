@@ -2162,8 +2162,9 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
     
     # Fill missing columns for consistent structure
     expected_cols = [
-        "Score", "Current Price", "Buy At", "Stop Loss", "Target", "Recommendation", "Intraday", "Swing",
-        "Short-Term", "Long-Term", "Breakout", "Ichimoku_Trend", "Status", "Error"
+        "Symbol", "Score", "Current Price", "Buy At", "Stop Loss", "Target", "Recommendation",
+        "Intraday", "Swing", "Short-Term", "Long-Term", "Mean_Reversion", "Breakout",
+        "Ichimoku_Trend", "Status", "Error"
     ]
     for col in expected_cols:
          if col not in results_df.columns:
@@ -2185,7 +2186,12 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
         )
         top_picks_df = success_df[buy_signal]
 
-    top_picks_df = top_picks_df.sort_values(by="Score", ascending=False).head(5)
+    top_picks_df = add_entry_quality_columns(top_picks_df)
+    top_picks_df = top_picks_df.sort_values(
+        by=["Ranking Score", "Reward/Risk", "Score"],
+        ascending=[False, False, False]
+    )
+    top_picks_df = limit_top_picks_by_sector(top_picks_df, max_per_sector=2, limit=5)
     
     return top_picks_df, results_df
 
@@ -2267,7 +2273,10 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
         return pd.DataFrame()
     
     # Ensure all required columns exist to avoid KeyError
-    expected_cols = ["Score", "Current Price", "Intraday", "Recommendation", "Buy At", "Stop Loss", "Target"]
+    expected_cols = [
+        "Symbol", "Score", "Current Price", "Intraday", "Recommendation",
+        "Buy At", "Stop Loss", "Target"
+    ]
     for col in expected_cols:
         if col not in results_df.columns:
             results_df[col] = None 
@@ -2282,7 +2291,12 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
         results_df = results_df[results_df["Recommendation"].str.contains("Buy", na=False)]
     else:
         results_df = results_df[results_df["Intraday"].str.contains("Buy", na=False)]
-    return results_df.sort_values(by="Score", ascending=False).head(5)
+    results_df = add_entry_quality_columns(results_df)
+    results_df = results_df.sort_values(
+        by=["Ranking Score", "Reward/Risk", "Score"],
+        ascending=[False, False, False]
+    )
+    return limit_top_picks_by_sector(results_df, max_per_sector=2, limit=5)
 
 def colored_recommendation(recommendation):
     if recommendation is None or not isinstance(recommendation, str):
@@ -2316,7 +2330,7 @@ def to_float_or_none(value):
         return None
     return float(value)
 
-def is_actionable_entry(row, max_distance_pct=0.08):
+def is_actionable_entry(row, max_distance_pct=0.08, min_reward_risk=1.8):
     current_price = to_float_or_none(row.get("Current Price"))
     buy_at = to_float_or_none(row.get("Buy At"))
     stop_loss = to_float_or_none(row.get("Stop Loss"))
@@ -2324,11 +2338,88 @@ def is_actionable_entry(row, max_distance_pct=0.08):
     if not all([current_price, buy_at, stop_loss, target]):
         return False
     distance_pct = abs(buy_at - current_price) / current_price
+    risk = buy_at - stop_loss
+    reward = target - buy_at
+    if risk <= 0:
+        return False
+    reward_risk = reward / risk
     return (
         buy_at > stop_loss
         and target > buy_at
         and distance_pct <= max_distance_pct
+        and reward_risk >= min_reward_risk
     )
+
+def get_stock_sector(symbol):
+    if not isinstance(symbol, str):
+        return "Other"
+    symbol = symbol.upper().strip()
+    for sector, symbols in SECTORS.items():
+        if symbol in symbols:
+            return sector
+    return "Other"
+
+def calculate_entry_metrics(row, max_distance_pct=0.08):
+    current_price = to_float_or_none(row.get("Current Price"))
+    buy_at = to_float_or_none(row.get("Buy At"))
+    stop_loss = to_float_or_none(row.get("Stop Loss"))
+    target = to_float_or_none(row.get("Target"))
+
+    if not all([current_price, buy_at, stop_loss, target]):
+        return pd.Series({
+            "Entry Distance %": np.nan,
+            "Reward/Risk": np.nan,
+            "Entry Quality": 0.0
+        })
+
+    distance_pct = abs(buy_at - current_price) / current_price
+    risk = buy_at - stop_loss
+    reward = target - buy_at
+    reward_risk = reward / risk if risk > 0 else np.nan
+    entry_quality = max(0.0, 1.0 - (distance_pct / max_distance_pct))
+
+    return pd.Series({
+        "Entry Distance %": distance_pct * 100,
+        "Reward/Risk": reward_risk,
+        "Entry Quality": entry_quality
+    })
+
+def add_entry_quality_columns(df):
+    ranked_df = df.copy()
+    if "Symbol" not in ranked_df.columns:
+        ranked_df["Symbol"] = None
+    if ranked_df.empty:
+        ranked_df["Entry Distance %"] = np.nan
+        ranked_df["Reward/Risk"] = np.nan
+        ranked_df["Entry Quality"] = 0.0
+        ranked_df["Ranking Score"] = pd.Series(dtype=float)
+        ranked_df["Sector"] = pd.Series(dtype=object)
+        return ranked_df
+    metrics = ranked_df.apply(calculate_entry_metrics, axis=1)
+    ranked_df = pd.concat([ranked_df, metrics], axis=1)
+    ranked_df["Score"] = pd.to_numeric(ranked_df["Score"], errors="coerce").fillna(0)
+    ranked_df["Ranking Score"] = ranked_df["Score"] + ranked_df["Entry Quality"]
+    ranked_df["Sector"] = ranked_df["Symbol"].apply(get_stock_sector)
+    return ranked_df
+
+def limit_top_picks_by_sector(df, max_per_sector=2, limit=5):
+    if df.empty:
+        return df.copy()
+
+    selected_indices = []
+    sector_counts = {}
+    for index, row in df.iterrows():
+        sector = row.get("Sector") or "Other"
+        if sector_counts.get(sector, 0) >= max_per_sector:
+            continue
+        selected_indices.append(index)
+        sector_counts[sector] = sector_counts.get(sector, 0) + 1
+        if len(selected_indices) >= limit:
+            break
+
+    if not selected_indices:
+        return df.head(0).copy()
+    return df.loc[selected_indices].reset_index(drop=True)
 
 def format_currency(value):
     if isinstance(value, tuple):
