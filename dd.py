@@ -681,19 +681,16 @@ def assess_risk(data):
     else:
         return "Low Volatility"
 
-def optimize_rsi_window(data, windows=range(5, 15)):
-    best_window, best_sharpe = 9, -float('inf')
-    returns = data['Close'].pct_change().dropna()
-    if len(returns) < 50:
-        return best_window
-    for window in windows:
-        rsi = ta.momentum.RSIIndicator(data['Close'], window=window).rsi()
-        signals = (rsi < 30).astype(int) - (rsi > 70).astype(int)
-        strategy_returns = signals.shift(1) * returns
-        sharpe = strategy_returns.mean() / strategy_returns.std() if strategy_returns.std() != 0 else 0
-        if sharpe > best_sharpe:
-            best_sharpe, best_window = sharpe, window
-    return best_window
+def get_dynamic_rsi_window(data):
+    try:
+        atr = to_float_or_none(data['ATR'].iloc[-1]) if 'ATR' in data.columns else None
+        close = to_float_or_none(data['Close'].iloc[-1]) if 'Close' in data.columns else None
+        if not atr or not close:
+            return 14
+        atr_pct = atr / close
+        return 9 if atr_pct > 0.03 else 14
+    except Exception:
+        return 14
 
 def detect_divergence(data):
     recent = data[['Close', 'RSI']].dropna().tail(5)
@@ -847,7 +844,7 @@ def analyze_stock(data, interval="1d"):
 
     try:
         if can_compute_indicator(data, 'RSI'):
-            rsi_window = optimize_rsi_window(data)
+            rsi_window = get_dynamic_rsi_window(data)
             data['RSI'] = ta.momentum.RSIIndicator(data['Close'], window=rsi_window).rsi()
         else:
             data['RSI'] = None
