@@ -12,6 +12,7 @@ import plotly.express as px
 import time
 import requests
 import io
+import math
 import random
 import spacy
 from pytrends.request import TrendReq
@@ -2506,21 +2507,22 @@ def entry_distance_adjustment(distance_pct):
     distance_pct = to_number_or_none(distance_pct)
     if distance_pct is None:
         return 0.0
+    if distance_pct < 1:
+        return 1.5
     if distance_pct < 2:
         return 1.0
-    if distance_pct > 5:
-        return -1.0
+    if distance_pct < 4:
+        return 0.5
     return 0.0
 
 def liquidity_adjustment(avg_volume_value):
     avg_volume_value = to_number_or_none(avg_volume_value)
-    if avg_volume_value is None:
+    if avg_volume_value is None or avg_volume_value <= 0:
         return 0.0
-    if avg_volume_value > 50_000_000:
-        return 1.0
-    if avg_volume_value < 10_000_000:
-        return -1.0
-    return 0.0
+    turnover_cr = avg_volume_value / 10_000_000
+    if turnover_cr <= 0:
+        return 0.0
+    return min(math.log10(turnover_cr) / 2, 2.0)
 
 def rvol_adjustment(rvol):
     rvol = to_number_or_none(rvol)
@@ -2665,7 +2667,7 @@ def format_compact_currency(value):
 
 def ranking_audit_text(row):
     return (
-        f"Ranking: {format_number(row.get('Ranking Score'))} | "
+        f"Opportunity Score: {format_number(row.get('Ranking Score'))} | "
         f"RS: {format_percent(row.get('Relative Strength'))} "
         f"({format_number(row.get('Relative Strength Score'), 1)}) | "
         f"RVOL: {format_number(row.get('RVOL'))} "
