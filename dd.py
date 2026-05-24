@@ -29,29 +29,41 @@ from streamlit import cache_data
 
 load_dotenv()
 
-def get_config_value(*names):
+def get_config_value_with_source(*names):
     secret_sections = ("angelone", "smartapi", "smart_api", "broker")
     for name in names:
         value = os.getenv(name)
         if value:
-            return value.strip() if isinstance(value, str) else value
+            return value.strip() if isinstance(value, str) else value, f"env:{name}"
 
     try:
         for name in names:
             value = st.secrets.get(name)
             if value:
-                return value.strip() if isinstance(value, str) else value
+                return value.strip() if isinstance(value, str) else value, f"secrets:{name}"
 
         for section in secret_sections:
             values = st.secrets.get(section, {})
             for name in names:
                 value = values.get(name) if hasattr(values, "get") else None
                 if value:
-                    return value.strip() if isinstance(value, str) else value
+                    return value.strip() if isinstance(value, str) else value, f"secrets:{section}.{name}"
     except Exception:
         pass
 
-    return None
+    return None, None
+
+def get_config_value(*names):
+    value, _ = get_config_value_with_source(*names)
+    return value
+
+def mask_secret(value):
+    if not value:
+        return "missing"
+    text = str(value)
+    if len(text) <= 4:
+        return "*" * len(text)
+    return f"{text[:2]}{'*' * max(len(text) - 4, 4)}{text[-2:]}"
 
 @st.cache_data(ttl=86400)
 def load_symbol_token_map():
@@ -80,7 +92,7 @@ logging.getLogger("streamlit.runtime.scriptrunner.script_runner").addFilter(Cont
 CLIENT_ID = get_config_value("CLIENT_ID", "ANGEL_CLIENT_ID", "client_id")
 PASSWORD = get_config_value("PASSWORD", "PIN", "MPIN", "password")
 TOTP_SECRET = get_config_value("TOTP_SECRET", "TOTP", "totp_secret", "totp")
-HISTORICAL_API_KEY = get_config_value("HISTORICAL_API_KEY", "TRADING_API_KEY", "API_KEY", "api_key")
+HISTORICAL_API_KEY, HISTORICAL_API_KEY_SOURCE = get_config_value_with_source("API_KEY", "TRADING_API_KEY", "HISTORICAL_API_KEY", "api_key")
 API_KEYS = {
     "Historical": HISTORICAL_API_KEY,
     "Trading": get_config_value("TRADING_API_KEY", "API_KEY", "api_key"),
@@ -320,6 +332,11 @@ def get_smartapi_session(api_key, client_id, password, totp_secret):
         return None
 
     try:
+        logging.info(
+            "Using SmartAPI historical key from %s: %s",
+            HISTORICAL_API_KEY_SOURCE or "unknown",
+            mask_secret(api_key),
+        )
         smart_api = SmartConnect(api_key=api_key)
         totp = pyotp.TOTP(totp_secret)
         data = smart_api.generateSession(client_id, password, totp.now())
