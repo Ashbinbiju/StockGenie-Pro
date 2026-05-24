@@ -2287,6 +2287,28 @@ def colored_recommendation(recommendation):
     else:
         return f"⚪ {recommendation}"
 
+def format_currency(value):
+    if isinstance(value, tuple):
+        value = value[0]
+    if value is None:
+        return "N/A"
+    try:
+        if pd.isna(value):
+            return "N/A"
+    except TypeError:
+        pass
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return f"₹{float(value):.2f}"
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "n/a"}:
+        return "N/A"
+    if text.startswith("₹"):
+        return text
+    try:
+        return f"₹{float(text):.2f}"
+    except ValueError:
+        return text
+
 def update_progress(progress_bar, loading_text, progress_value, loading_messages):
     progress_bar.progress(progress_value)
     loading_message = next(loading_messages)
@@ -2379,9 +2401,9 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                     target = row.get('Target', 'N/A')
                     if st.session_state.recommendation_mode == "Adaptive":
                         st.markdown(f"""
-                        {tooltip('Current Price', TOOLTIPS['Stop Loss'])}: ₹{current_price}  
-                        Buy At: ₹{buy_at} | Stop Loss: ₹{stop_loss}  
-                        Target: ₹{target}  
+                        {tooltip('Current Price', TOOLTIPS['Stop Loss'])}: {format_currency(current_price)}  
+                        Buy At: {format_currency(buy_at)} | Stop Loss: {format_currency(stop_loss)}  
+                        Target: {format_currency(target)}  
                         Recommendation: {colored_recommendation(row.get('Recommendation', 'N/A'))}  
                         Regime: {row.get('Regime', 'N/A')}  
                         Position Size (₹): {row.get('Position Size', 'N/A')}  
@@ -2390,9 +2412,9 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                         """)
                     else:
                         st.markdown(f"""
-                        {tooltip('Current Price', TOOLTIPS['Stop Loss'])}: ₹{current_price}  
-                        Buy At: ₹{buy_at} | Stop Loss: ₹{stop_loss}  
-                        Target: ₹{target}  
+                        {tooltip('Current Price', TOOLTIPS['Stop Loss'])}: {format_currency(current_price)}  
+                        Buy At: {format_currency(buy_at)} | Stop Loss: {format_currency(stop_loss)}  
+                        Target: {format_currency(target)}  
                         Intraday: {colored_recommendation(row.get('Intraday', 'N/A'))}  
                         Swing: {colored_recommendation(row.get('Swing', 'N/A'))}  
                         Short-Term: {colored_recommendation(row.get('Short-Term', 'N/A'))}  
@@ -2464,11 +2486,11 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                         elif entry_type == "Pullback":
                              buy_label = "Buy On Pullback"
                              buy_icon = "🔵"
-                             
+                            
                         st.markdown(f"""
-                        {tooltip('Current Price', TOOLTIPS['Stop Loss'])}: ₹{current_price}  
-                        {buy_icon} {buy_label}: ₹{buy_at} | Stop Loss: ₹{stop_loss}  
-                        Target: ₹{target}  
+                        {tooltip('Current Price', TOOLTIPS['Stop Loss'])}: {format_currency(current_price)}  
+                        {buy_icon} {buy_label}: {format_currency(buy_at)} | Stop Loss: {format_currency(stop_loss)}  
+                        Target: {format_currency(target)}  
                         Recommendation: {colored_recommendation(row.get('Recommendation', 'N/A'))}  
                         Regime: {row.get('Regime', 'N/A')}  
                         Position Size (₹): {row.get('Position Size', 'N/A')}  
@@ -2487,9 +2509,9 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                              buy_icon = "🔵"
 
                         st.markdown(f"""
-                        {tooltip('Current Price', TOOLTIPS['Stop Loss'])}: ₹{current_price}  
-                        {buy_icon} {buy_label}: ₹{buy_at} | Stop Loss: ₹{stop_loss}  
-                        Target: ₹{target}  
+                        {tooltip('Current Price', TOOLTIPS['Stop Loss'])}: {format_currency(current_price)}  
+                        {buy_icon} {buy_label}: {format_currency(buy_at)} | Stop Loss: {format_currency(stop_loss)}  
+                        Target: {format_currency(target)}  
                         Intraday: {colored_recommendation(row.get('Intraday', 'N/A'))}
                         
                         **Strategy Notes:**
@@ -2537,7 +2559,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
             col1, col2, col3, col4, col5 = st.columns(5)
             with col1:
                 current_price = recommendations.get('Current Price', 'N/A')
-                st.metric(tooltip("Current Price", TOOLTIPS['RSI']), f"₹{current_price}")
+                st.metric(tooltip("Current Price", TOOLTIPS['RSI']), format_currency(current_price))
             with col2:
                 buy_at = recommendations.get('Buy At', 'N/A')
                 entry_type = recommendations.get('Entry Type', 'Standard')
@@ -2553,13 +2575,13 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                     label = "⚠️ No Trade"
                     buy_at = "Choppy"
                 
-                st.metric(label, f"₹{buy_at}" if isinstance(buy_at, (int, float)) else buy_at)
+                st.metric(label, format_currency(buy_at))
             with col3:
                 stop_loss = recommendations.get('Stop Loss', 'N/A')
-                st.metric(tooltip("Stop Loss", TOOLTIPS['Stop Loss']), f"₹{stop_loss}")
+                st.metric(tooltip("Stop Loss", TOOLTIPS['Stop Loss']), format_currency(stop_loss))
             with col4:
                 target = recommendations.get('Target', 'N/A')
-                st.metric("Target", f"₹{target}")
+                st.metric("Target", format_currency(target))
             with col5:
                 regime = recommendations.get('Regime', 'N/A') if st.session_state.recommendation_mode == "Adaptive" else 'N/A'
                 st.metric("Market Regime", regime)
