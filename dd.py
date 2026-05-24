@@ -56,7 +56,7 @@ logging.getLogger("streamlit.runtime.scriptrunner.script_runner").addFilter(Cont
 CLIENT_ID = os.getenv("CLIENT_ID")
 PASSWORD = os.getenv("PASSWORD")
 TOTP_SECRET = os.getenv("TOTP_SECRET")
-HISTORICAL_API_KEY = os.getenv("HISTORICAL_API_KEY") or os.getenv("ANGELONE_API_KEY")
+HISTORICAL_API_KEY = os.getenv("HISTORICAL_API_KEY") or os.getenv("TRADING_API_KEY")
 API_KEYS = {
     "Historical": HISTORICAL_API_KEY,
     "Trading": os.getenv("TRADING_API_KEY"),
