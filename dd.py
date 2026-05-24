@@ -2627,6 +2627,45 @@ def format_currency(value):
     except ValueError:
         return text
 
+def format_number(value, decimals=2):
+    value = to_number_or_none(value)
+    if value is None:
+        return "N/A"
+    return f"{value:.{decimals}f}"
+
+def format_percent(value, decimals=2):
+    value = to_number_or_none(value)
+    if value is None:
+        return "N/A"
+    return f"{value:.{decimals}f}%"
+
+def format_compact_currency(value):
+    value = to_number_or_none(value)
+    if value is None:
+        return "N/A"
+    if abs(value) >= 10_000_000:
+        return f"₹{value / 10_000_000:.2f}Cr"
+    if abs(value) >= 100_000:
+        return f"₹{value / 100_000:.2f}L"
+    return f"₹{value:.0f}"
+
+def ranking_audit_text(row):
+    return (
+        f"Ranking: {format_number(row.get('Ranking Score'))} | "
+        f"RS: {format_percent(row.get('Relative Strength'))} "
+        f"({format_number(row.get('Relative Strength Score'), 1)}) | "
+        f"RVOL: {format_number(row.get('RVOL'))} "
+        f"({format_number(row.get('RVOL Score'), 1)}) | "
+        f"Sector: {row.get('Sector', 'Other')} "
+        f"{format_percent(row.get('Sector Performance %'))} "
+        f"({format_number(row.get('Sector Momentum Score'), 1)}) | "
+        f"RR: {format_number(row.get('Reward/Risk'))} | "
+        f"Entry Gap: {format_percent(row.get('Entry Distance %'))} "
+        f"({format_number(row.get('Entry Distance Score'), 1)}) | "
+        f"Liquidity: {format_compact_currency(row.get('Avg Volume Value'))} "
+        f"({format_number(row.get('Liquidity Score'), 1)})"
+    )
+
 def update_progress(progress_bar, loading_text, progress_value, loading_messages):
     progress_bar.progress(progress_value)
     loading_message = next(loading_messages)
@@ -2722,6 +2761,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                         {tooltip('Current Price', TOOLTIPS['Stop Loss'])}: {format_currency(current_price)}  
                         Buy At: {format_currency(buy_at)} | Stop Loss: {format_currency(stop_loss)}  
                         Target: {format_currency(target)}  
+                        **Audit**: {ranking_audit_text(row)}
                         Recommendation: {colored_recommendation(row.get('Recommendation', 'N/A'))}  
                         Regime: {row.get('Regime', 'N/A')}  
                         Position Size (₹): {row.get('Position Size', 'N/A')}  
@@ -2733,6 +2773,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                         {tooltip('Current Price', TOOLTIPS['Stop Loss'])}: {format_currency(current_price)}  
                         Buy At: {format_currency(buy_at)} | Stop Loss: {format_currency(stop_loss)}  
                         Target: {format_currency(target)}  
+                        **Audit**: {ranking_audit_text(row)}
                         Intraday: {colored_recommendation(row.get('Intraday', 'N/A'))}  
                         Swing: {colored_recommendation(row.get('Swing', 'N/A'))}  
                         Short-Term: {colored_recommendation(row.get('Short-Term', 'N/A'))}  
@@ -2809,6 +2850,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                         {tooltip('Current Price', TOOLTIPS['Stop Loss'])}: {format_currency(current_price)}  
                         {buy_icon} {buy_label}: {format_currency(buy_at)} | Stop Loss: {format_currency(stop_loss)}  
                         Target: {format_currency(target)}  
+                        **Audit**: {ranking_audit_text(row)}
                         Recommendation: {colored_recommendation(row.get('Recommendation', 'N/A'))}  
                         Regime: {row.get('Regime', 'N/A')}  
                         Position Size (₹): {row.get('Position Size', 'N/A')}  
@@ -2830,6 +2872,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                         {tooltip('Current Price', TOOLTIPS['Stop Loss'])}: {format_currency(current_price)}  
                         {buy_icon} {buy_label}: {format_currency(buy_at)} | Stop Loss: {format_currency(stop_loss)}  
                         Target: {format_currency(target)}  
+                        **Audit**: {ranking_audit_text(row)}
                         Intraday: {colored_recommendation(row.get('Intraday', 'N/A'))}
                         
                         **Strategy Notes:**
