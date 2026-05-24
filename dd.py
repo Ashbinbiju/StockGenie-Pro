@@ -783,7 +783,7 @@ def validate_data(
 
     return True
 
-def analyze_stock(data):
+def analyze_stock(data, interval="1d"):
     """
     Computes technical indicators for stock data after validation.
     Returns data with indicators or an empty DataFrame on failure.
@@ -896,15 +896,17 @@ def analyze_stock(data):
         data['OBV'] = None
 
     try:
-        if can_compute_indicator(data, 'VWAP'):
-            data['Cumulative_TP'] = ((data['High'] + data['Low'] + data['Close']) / 3) * data['Volume']
-            data['Cumulative_Volume'] = data['Volume'].cumsum()
-            data['VWAP'] = data['Cumulative_TP'].cumsum() / data['Cumulative_Volume']
+        if interval in ["5m", "15m"] and can_compute_indicator(data, 'VWAP'):
+            typical_price_volume = ((data['High'] + data['Low'] + data['Close']) / 3) * data['Volume']
+            session_key = data.index.date if isinstance(data.index, pd.DatetimeIndex) else pd.Series(0, index=data.index)
+            session_tp_volume = typical_price_volume.groupby(session_key).cumsum()
+            session_volume = data['Volume'].groupby(session_key).cumsum()
+            data['VWAP'] = session_tp_volume / session_volume.replace(0, np.nan)
         else:
-            data['VWAP'] = None
+            data['VWAP'] = np.nan
     except Exception as e:
         logging.warning(f"Failed to compute VWAP: {str(e)}")
-        data['VWAP'] = None
+        data['VWAP'] = np.nan
 
     try:
         if can_compute_indicator(data, 'Volume_Spike'):
@@ -1779,7 +1781,7 @@ def get_top_sectors_cached(rate_limit_delay=2, stocks_per_sector=2):
             data = fetch_stock_data_cached(symbol)
             if data.empty:
                 continue
-            data = analyze_stock(data)
+            data = analyze_stock(data, interval="1d")
             rec = generate_recommendations(data, symbol)
             total_score += rec.get("Score", 0)
             count += 1
@@ -2021,7 +2023,7 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
                 "Current Price": 0
             }
         
-        data = analyze_stock(data)
+        data = analyze_stock(data, interval=interval)
         logging.info(f"Analyzing {symbol} in {recommendation_mode} mode")
         
         if recommendation_mode == "Adaptive":
@@ -2909,7 +2911,7 @@ def main():
             with st.spinner("Loading stock data..."):
                 data = fetch_stock_data_with_auth(symbol)
                 if not data.empty:
-                    data = analyze_stock(data)
+                    data = analyze_stock(data, interval="1d")
                     recommendations = (adaptive_recommendation(data) if recommendation_mode == "Adaptive"
                                       else generate_recommendations(data, symbol))
                     st.session_state.symbol = symbol
