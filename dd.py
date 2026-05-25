@@ -125,7 +125,7 @@ RANKING_WEIGHTS = {
     "liquidity": 0.10,
     "entry": 0.10,
 }
-OPPORTUNITY_SCORE_SCALE = 10
+OPPORTUNITY_SCORE_SCALE = 100
 
 TOOLTIPS = {
     "RSI": "Relative Strength Index (30=Oversold, 70=Overbought)",
