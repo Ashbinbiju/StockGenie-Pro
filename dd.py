@@ -1550,6 +1550,7 @@ def generate_recommendations(data, symbol=None):
         "Mean_Reversion": "Hold", "Breakout": "Hold", "Ichimoku_Trend": "Hold",
         "Current Price": None, "Buy At": None,
         "Stop Loss": None, "Target": None, "Score": 0,
+        "Major Trend Conflict": False,
         "Pattern Notes": None, "Entry Strategy": None # Added for advanced details
     }
 
@@ -1770,6 +1771,11 @@ def generate_recommendations(data, symbol=None):
             elif pd.notnull(revenue_growth) and revenue_growth < 0:
                 sell_score += 0.5
 
+        major_trend_conflict = recommendations["Ichimoku_Trend"] == "Strong Sell"
+        if major_trend_conflict:
+            buy_score = max(0, buy_score - 2)
+            sell_score += 2
+
         net_score = buy_score - sell_score
         if buy_score > sell_score and buy_score >= 4:
             recommendations["Intraday"] = "Strong Buy"
@@ -1795,6 +1801,15 @@ def generate_recommendations(data, symbol=None):
         if recommendations["Mean_Reversion"] == "Sell" and recommendations["Swing"] == "Buy":
             buy_score = max(0, buy_score - 1)
 
+        recommendations["Major Trend Conflict"] = has_major_trend_conflict(recommendations)
+        if recommendations["Major Trend Conflict"]:
+            for signal in ("Intraday", "Swing", "Short-Term", "Long-Term", "Breakout"):
+                if is_buy_signal(recommendations.get(signal)):
+                    recommendations[signal] = "Hold"
+            conflict_note = "Major trend conflict: Ichimoku Strong Sell blocked bullish recommendation."
+            existing_notes = recommendations.get("Pattern Notes")
+            recommendations["Pattern Notes"] = f"{existing_notes} | {conflict_note}" if existing_notes else conflict_note
+
         recommendations["Buy At"], recommendations["Entry Type"] = calculate_buy_at(data)
         if is_valid_price(recommendations["Buy At"]):
             recommendations["Stop Loss"] = calculate_stop_loss(data, entry_price=recommendations["Buy At"])
@@ -1807,7 +1822,10 @@ def generate_recommendations(data, symbol=None):
             recommendations["Stop Loss"] = None
             recommendations["Target"] = None
 
-        recommendations["Score"] = min(max(buy_score - sell_score, -7), 7)
+        final_score = buy_score - sell_score
+        if recommendations["Major Trend Conflict"]:
+            final_score = min(final_score, MIN_TOP_PICK_SCORE - 1)
+        recommendations["Score"] = min(max(final_score, -7), 7)
     except Exception as e:
         st.warning(f"⚠️ Error generating recommendations: {str(e)}")
     return recommendations
@@ -2123,7 +2141,8 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
                 "Long-Term": None,
                 "Mean_Reversion": None,
                 "Breakout": None,
-                "Ichimoku_Trend": None
+                "Ichimoku_Trend": None,
+                "Major Trend Conflict": rec.get("Major Trend Conflict", False)
             }
         else:
             rec = generate_recommendations(data, symbol)
@@ -2174,6 +2193,7 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
                 "Mean_Reversion": rec.get("Mean_Reversion", "Hold"),
                 "Breakout": rec.get("Breakout", "Hold"),
                 "Ichimoku_Trend": rec.get("Ichimoku_Trend", "Hold"),
+                "Major Trend Conflict": rec.get("Major Trend Conflict", False),
                 "Score": rec.get("Score", 0),
                 "Entry Type": rec.get("Entry Type", "Standard"),
                 "Recommendation": None,
@@ -2215,7 +2235,8 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
     expected_cols = [
         "Symbol", "Score", "Current Price", "Recent Return", "RVOL", "Avg Volume Value",
         "Buy At", "Stop Loss", "Target", "Recommendation", "Intraday", "Swing", "Short-Term",
-        "Long-Term", "Mean_Reversion", "Breakout", "Ichimoku_Trend", "Status", "Error"
+        "Long-Term", "Mean_Reversion", "Breakout", "Ichimoku_Trend", "Major Trend Conflict",
+        "Status", "Error"
     ]
     for col in expected_cols:
          if col not in results_df.columns:
@@ -2332,7 +2353,8 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
     # Ensure all required columns exist to avoid KeyError
     expected_cols = [
         "Symbol", "Score", "Current Price", "Recent Return", "RVOL", "Avg Volume Value",
-        "Intraday", "Recommendation", "Buy At", "Stop Loss", "Target"
+        "Intraday", "Recommendation", "Buy At", "Stop Loss", "Target",
+        "Ichimoku_Trend", "Major Trend Conflict"
     ]
     for col in expected_cols:
         if col not in results_df.columns:
@@ -2434,7 +2456,27 @@ def calculate_volume_metrics(data):
     avg_volume_value = avg_volume * current_close if avg_volume else np.nan
     return rvol, avg_volume_value
 
+def is_buy_signal(value):
+    return isinstance(value, str) and "Buy" in value
+
+def has_major_trend_conflict(row):
+    conflict_flag = row.get("Major Trend Conflict", False)
+    if conflict_flag is True or (
+        isinstance(conflict_flag, str) and conflict_flag.strip().lower() == "true"
+    ):
+        return True
+    if row.get("Ichimoku_Trend") != "Strong Sell":
+        return False
+    buy_signal_columns = (
+        "Recommendation", "Intraday", "Swing", "Short-Term",
+        "Long-Term", "Mean_Reversion", "Breakout"
+    )
+    return any(is_buy_signal(row.get(column)) for column in buy_signal_columns)
+
 def is_actionable_entry(row, max_distance_pct=0.08, min_reward_risk=1.8):
+    if has_major_trend_conflict(row):
+        return False
+
     current_price = to_float_or_none(row.get("Current Price"))
     buy_at = to_float_or_none(row.get("Buy At"))
     stop_loss = to_float_or_none(row.get("Stop Loss"))
