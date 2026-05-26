@@ -125,11 +125,33 @@ RANKING_WEIGHTS = {
     "liquidity": 0.10,
     "entry": 0.10,
 }
+INTRADAY_RANKING_WEIGHTS = {
+    "rvol": 0.30,
+    "liquidity": 0.25,
+    "entry": 0.20,
+    "sector": 0.15,
+    "relative_strength": 0.10,
+}
 OPPORTUNITY_SCORE_SCALE = 100
+OPPORTUNITY_SCORE_MAX_RAW = 2.0
+MAX_RANKED_ENTRY_GAP_PERCENT = 3.0
+FRESH_BREAKOUT_LOOKBACK = 20
+FRESH_BREAKOUT_MAX_AGE = 3
+FRESH_BREAKOUT_RANKING_BONUS = 0.5
+MIN_INTRADAY_LIQUIDITY_CR = 10
+MIN_INTRADAY_LIQUIDITY_VALUE = MIN_INTRADAY_LIQUIDITY_CR * 10_000_000
+MIN_INTRADAY_BREAKOUT_RS = 2.5
 EXHAUSTION_RVOL_THRESHOLD = 5.0
 EXHAUSTION_EMA20_DISTANCE_THRESHOLD = 8.0
 EXHAUSTION_DAILY_MOVE_THRESHOLD = 8.0
 MAX_EXHAUSTION_RANKING_PENALTY = 2.0
+INTRADAY_EXHAUSTION_RVOL_THRESHOLD = 8.0
+INTRADAY_EXHAUSTION_EMA20_DISTANCE_THRESHOLD = 10.0
+INTRADAY_EXHAUSTION_DAILY_MOVE_THRESHOLD = 12.0
+INTRADAY_MAX_EXHAUSTION_RANKING_PENALTY = 1.0
+INTRADAY_GAP_RISK_MOVE_THRESHOLD = 6.0
+INTRADAY_OVERNIGHT_GAP_THRESHOLD = 3.0
+INTRADAY_GAP_RISK_PENALTY = 0.5
 
 TOOLTIPS = {
     "RSI": "Relative Strength Index (30=Oversold, 70=Overbought)",
@@ -581,7 +603,7 @@ def fetch_stock_data_cached(symbol, period="2y", interval="1d"):
     return fetch_stock_data_with_auth(symbol, period, interval)
 
 @st.cache_data(ttl=1800)
-def fetch_nifty_5d_return():
+def fetch_nifty_recent_return(interval="ONE_DAY", lookback_days=10, candles=5):
     try:
         auth_error = get_smartapi_auth_error()
         if auth_error:
@@ -593,12 +615,12 @@ def fetch_nifty_5d_return():
             return 0.0
 
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=10)
+        start_date = end_date - timedelta(days=lookback_days)
         enforce_rate_limit()
         historical_data = smart_api.getCandleData({
             "exchange": "NSE",
             "symboltoken": NIFTY_50_TOKEN,
-            "interval": "ONE_DAY",
+            "interval": interval,
             "fromdate": start_date.strftime("%Y-%m-%d %H:%M"),
             "todate": end_date.strftime("%Y-%m-%d %H:%M")
         })
@@ -607,11 +629,17 @@ def fetch_nifty_5d_return():
             return 0.0
 
         data = pd.DataFrame(historical_data["data"], columns=["Date", "Open", "High", "Low", "Close", "Volume"])
-        return_value = calculate_recent_return(data, candles=5)
+        return_value = calculate_recent_return(data, candles=candles)
         return 0.0 if pd.isna(return_value) else float(return_value)
     except Exception as e:
         logging.warning(f"Failed to compute NIFTY relative-strength benchmark: {str(e)}")
         return 0.0
+
+def fetch_nifty_5d_return():
+    return fetch_nifty_recent_return(interval="ONE_DAY", lookback_days=10, candles=5)
+
+def fetch_nifty_intraday_return():
+    return fetch_nifty_recent_return(interval="FIFTEEN_MINUTE", lookback_days=5, candles=5)
 
 def calculate_advance_decline_ratio(stock_list):
     advances = 0
@@ -2089,6 +2117,8 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
         data = analyze_stock(data, interval=interval)
         recent_return = calculate_recent_return(data)
         latest_move_pct, ema20_distance_pct = calculate_momentum_extension_metrics(data)
+        previous_day_move_pct, overnight_gap_pct = calculate_session_gap_metrics(data)
+        fresh_breakout_age = calculate_fresh_breakout_age(data)
         rvol, avg_volume_value = calculate_volume_metrics(data)
         logging.info(f"Analyzing {symbol} in {recommendation_mode} mode")
         
@@ -2127,7 +2157,10 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
                 "Current Price": rec.get("Current Price"),
                 "Recent Return": recent_return,
                 "Latest Move %": latest_move_pct,
+                "Previous Day Move %": previous_day_move_pct,
+                "Overnight Gap %": overnight_gap_pct,
                 "EMA20 Distance %": ema20_distance_pct,
+                "Fresh Breakout Age": fresh_breakout_age,
                 "RVOL": rvol,
                 "Avg Volume Value": avg_volume_value,
                 "Buy At": rec.get("Buy At"),
@@ -2187,7 +2220,10 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
                 "Current Price": rec.get("Current Price"),
                 "Recent Return": recent_return,
                 "Latest Move %": latest_move_pct,
+                "Previous Day Move %": previous_day_move_pct,
+                "Overnight Gap %": overnight_gap_pct,
                 "EMA20 Distance %": ema20_distance_pct,
+                "Fresh Breakout Age": fresh_breakout_age,
                 "RVOL": rvol,
                 "Avg Volume Value": avg_volume_value,
                 "Buy At": rec.get("Buy At"),
@@ -2243,7 +2279,7 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
     # Fill missing columns for consistent structure
     expected_cols = [
         "Symbol", "Score", "Current Price", "Recent Return", "Latest Move %",
-        "EMA20 Distance %", "RVOL", "Avg Volume Value",
+        "EMA20 Distance %", "Fresh Breakout Age", "RVOL", "Avg Volume Value",
         "Buy At", "Stop Loss", "Target", "Recommendation", "Intraday", "Swing", "Short-Term",
         "Long-Term", "Mean_Reversion", "Breakout", "Ichimoku_Trend", "Major Trend Conflict",
         "Status", "Error"
@@ -2363,9 +2399,9 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
     # Ensure all required columns exist to avoid KeyError
     expected_cols = [
         "Symbol", "Score", "Current Price", "Recent Return", "Latest Move %",
-        "EMA20 Distance %", "RVOL", "Avg Volume Value",
+        "Previous Day Move %", "Overnight Gap %", "EMA20 Distance %", "Fresh Breakout Age", "RVOL", "Avg Volume Value",
         "Intraday", "Recommendation", "Buy At", "Stop Loss", "Target",
-        "Ichimoku_Trend", "Major Trend Conflict"
+        "Ichimoku_Trend", "Major Trend Conflict", "Entry Type"
     ]
     for col in expected_cols:
         if col not in results_df.columns:
@@ -2375,7 +2411,7 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
         results_df["Score"] = 0
 
     sector_momentum = calculate_sector_momentum_map(results_df)
-    nifty_5d_return = fetch_nifty_5d_return()
+    nifty_5d_return = fetch_nifty_intraday_return()
     results_df["Score"] = pd.to_numeric(results_df["Score"], errors="coerce").fillna(0)
     results_df = results_df[results_df.apply(is_actionable_entry, axis=1)]
     results_df = results_df[results_df["Score"] >= MIN_TOP_PICK_SCORE]
@@ -2385,7 +2421,16 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
         results_df = results_df[results_df["Recommendation"].str.contains("Buy", na=False)]
     else:
         results_df = results_df[results_df["Intraday"].str.contains("Buy", na=False)]
-    results_df = add_entry_quality_columns(results_df, sector_momentum, nifty_5d_return)
+    results_df = add_entry_quality_columns(
+        results_df,
+        sector_momentum,
+        nifty_5d_return,
+        ranking_weights=INTRADAY_RANKING_WEIGHTS,
+        intraday=True,
+    )
+    if results_df.empty:
+        return pd.DataFrame()
+    results_df = results_df[results_df.apply(is_intraday_quality_setup, axis=1)]
     results_df = results_df.sort_values(
         by=["Ranking Score", "Reward/Risk", "Score"],
         ascending=[False, False, False]
@@ -2401,6 +2446,21 @@ def colored_recommendation(recommendation):
         return f"🔴 {recommendation}"
     else:
         return f"⚪ {recommendation}"
+
+def clean_display_text(value, fallback="—"):
+    if isinstance(value, tuple):
+        value = value[0]
+    if value is None:
+        return fallback
+    try:
+        if pd.isna(value):
+            return fallback
+    except TypeError:
+        pass
+    text = str(value).strip()
+    if not text or text.lower() == "nan":
+        return fallback
+    return text
 
 def is_valid_price(value):
     if isinstance(value, tuple):
@@ -2467,6 +2527,57 @@ def calculate_momentum_extension_metrics(data):
             ema20_distance_pct = ((current_close - ema20) / ema20) * 100
 
     return latest_move_pct, ema20_distance_pct
+
+def calculate_session_gap_metrics(data):
+    if data.empty or not {"Open", "Close"}.issubset(data.columns) or len(data) < 2:
+        return np.nan, np.nan
+    if not isinstance(data.index, pd.DatetimeIndex):
+        return np.nan, np.nan
+
+    session_df = data[["Open", "Close"]].copy()
+    session_df["_SessionDate"] = session_df.index.date
+    sessions = session_df.groupby("_SessionDate").agg({"Open": "first", "Close": "last"})
+    sessions = sessions.dropna()
+    if len(sessions) < 2:
+        return np.nan, np.nan
+
+    previous_session = sessions.iloc[-2]
+    current_session = sessions.iloc[-1]
+    previous_open = to_float_or_none(previous_session["Open"])
+    previous_close = to_float_or_none(previous_session["Close"])
+    current_open = to_float_or_none(current_session["Open"])
+    if not previous_open or not previous_close or not current_open:
+        return np.nan, np.nan
+
+    previous_day_move_pct = ((previous_close - previous_open) / previous_open) * 100
+    overnight_gap_pct = ((current_open - previous_close) / previous_close) * 100
+    return previous_day_move_pct, overnight_gap_pct
+
+def calculate_fresh_breakout_age(data, lookback=FRESH_BREAKOUT_LOOKBACK, max_age=FRESH_BREAKOUT_MAX_AGE):
+    if data.empty or not {"High", "Close"}.issubset(data.columns):
+        return np.nan
+    if len(data) < lookback + max_age + 2:
+        return np.nan
+
+    highs = pd.to_numeric(data["High"], errors="coerce")
+    closes = pd.to_numeric(data["Close"], errors="coerce")
+    for age in range(1, max_age + 1):
+        breakout_idx = len(data) - age
+        previous_idx = breakout_idx - 1
+        prior_start = breakout_idx - lookback
+        previous_prior_start = previous_idx - lookback
+        if prior_start < 0 or previous_prior_start < 0:
+            continue
+
+        prior_high = highs.iloc[prior_start:breakout_idx].max()
+        previous_prior_high = highs.iloc[previous_prior_start:previous_idx].max()
+        breakout_close = closes.iloc[breakout_idx]
+        previous_close = closes.iloc[previous_idx]
+        if pd.isna(prior_high) or pd.isna(previous_prior_high) or pd.isna(breakout_close) or pd.isna(previous_close):
+            continue
+        if breakout_close > prior_high and previous_close <= previous_prior_high:
+            return age
+    return np.nan
 
 def calculate_volume_metrics(data):
     if data.empty or not {"Close", "Volume"}.issubset(data.columns):
@@ -2577,11 +2688,11 @@ def entry_distance_adjustment(distance_pct):
     distance_pct = to_number_or_none(distance_pct)
     if distance_pct is None:
         return 0.0
-    if distance_pct < 1:
+    if distance_pct <= 1:
         return 1.5
-    if distance_pct < 2:
+    if distance_pct <= 2:
         return 1.0
-    if distance_pct < 4:
+    if distance_pct <= 3:
         return 0.5
     return 0.0
 
@@ -2604,31 +2715,78 @@ def rvol_adjustment(rvol):
         return 1.0
     return 0.0
 
-def momentum_exhaustion_penalty(row):
+def intraday_liquidity_factor(avg_volume_value):
+    avg_volume_value = to_number_or_none(avg_volume_value)
+    if avg_volume_value is None or avg_volume_value <= 0:
+        return 0.0
+    turnover_cr = avg_volume_value / 10_000_000
+    if turnover_cr < MIN_INTRADAY_LIQUIDITY_CR:
+        return 0.0
+    return min(1.5, max(0.5, turnover_cr / 20))
+
+def intraday_gap_risk_penalty(row):
+    previous_day_move_pct = to_number_or_none(row.get("Previous Day Move %"))
+    overnight_gap_pct = to_number_or_none(row.get("Overnight Gap %"))
+    if previous_day_move_pct is not None and previous_day_move_pct > INTRADAY_GAP_RISK_MOVE_THRESHOLD:
+        return -INTRADAY_GAP_RISK_PENALTY
+    if overnight_gap_pct is not None and abs(overnight_gap_pct) > INTRADAY_OVERNIGHT_GAP_THRESHOLD:
+        return -INTRADAY_GAP_RISK_PENALTY
+    return 0.0
+
+def fresh_breakout_bonus(row):
+    breakout_age = to_number_or_none(row.get("Fresh Breakout Age"))
+    if breakout_age is None:
+        return 0.0
+    if 1 <= breakout_age <= FRESH_BREAKOUT_MAX_AGE:
+        return FRESH_BREAKOUT_RANKING_BONUS
+    return 0.0
+
+def momentum_exhaustion_penalty(row, intraday=False):
     rvol = to_number_or_none(row.get("RVOL"))
     latest_move_pct = to_number_or_none(row.get("Latest Move %"))
     ema20_distance_pct = to_number_or_none(row.get("EMA20 Distance %"))
-    if rvol is None or rvol <= EXHAUSTION_RVOL_THRESHOLD:
+    rvol_threshold = INTRADAY_EXHAUSTION_RVOL_THRESHOLD if intraday else EXHAUSTION_RVOL_THRESHOLD
+    move_threshold = INTRADAY_EXHAUSTION_DAILY_MOVE_THRESHOLD if intraday else EXHAUSTION_DAILY_MOVE_THRESHOLD
+    ema20_threshold = INTRADAY_EXHAUSTION_EMA20_DISTANCE_THRESHOLD if intraday else EXHAUSTION_EMA20_DISTANCE_THRESHOLD
+    max_penalty = INTRADAY_MAX_EXHAUSTION_RANKING_PENALTY if intraday else MAX_EXHAUSTION_RANKING_PENALTY
+
+    if rvol is None or rvol <= rvol_threshold:
         return 0.0
 
     move_excess = max(
         0.0,
-        (latest_move_pct or 0.0) - EXHAUSTION_DAILY_MOVE_THRESHOLD
+        (latest_move_pct or 0.0) - move_threshold
     )
     ema_excess = max(
         0.0,
-        (ema20_distance_pct or 0.0) - EXHAUSTION_EMA20_DISTANCE_THRESHOLD
+        (ema20_distance_pct or 0.0) - ema20_threshold
     )
     extension_excess = max(move_excess, ema_excess)
     if extension_excess <= 0:
         return 0.0
 
     penalty = min(
-        MAX_EXHAUSTION_RANKING_PENALTY,
-        ((rvol - EXHAUSTION_RVOL_THRESHOLD) * 0.25)
+        max_penalty,
+        ((rvol - rvol_threshold) * 0.25)
         + (extension_excess * 0.15)
     )
     return -round(penalty, 2)
+
+def is_intraday_quality_setup(row):
+    avg_volume_value = to_number_or_none(row.get("Avg Volume Value"))
+    if avg_volume_value is None or avg_volume_value < MIN_INTRADAY_LIQUIDITY_VALUE:
+        return False
+
+    entry_type = str(row.get("Entry Type") or "").strip().lower()
+    relative_strength = to_number_or_none(row.get("Relative Strength"))
+    sector_perf = to_number_or_none(row.get("Sector Relative Strength %"))
+    is_breakout = entry_type == "breakout"
+
+    if is_breakout and (relative_strength is None or relative_strength <= MIN_INTRADAY_BREAKOUT_RS):
+        return False
+    if is_breakout and sector_perf is not None and sector_perf < 0:
+        return False
+    return True
 
 def calculate_entry_metrics(row, max_distance_pct=0.08):
     current_price = to_float_or_none(row.get("Current Price"))
@@ -2655,9 +2813,16 @@ def calculate_entry_metrics(row, max_distance_pct=0.08):
         "Entry Quality": entry_quality
     })
 
-def add_entry_quality_columns(df, sector_momentum=None, nifty_5d_return=0.0):
+def add_entry_quality_columns(
+    df,
+    sector_momentum=None,
+    nifty_5d_return=0.0,
+    ranking_weights=None,
+    intraday=False,
+):
     sector_momentum = sector_momentum or {}
     nifty_5d_return = to_number_or_none(nifty_5d_return) or 0.0
+    ranking_weights = ranking_weights or RANKING_WEIGHTS
     ranked_df = df.copy()
     if "Symbol" not in ranked_df.columns:
         ranked_df["Symbol"] = None
@@ -2667,21 +2832,33 @@ def add_entry_quality_columns(df, sector_momentum=None, nifty_5d_return=0.0):
         ranked_df["Entry Quality"] = 0.0
         ranked_df["Sector Performance %"] = np.nan
         ranked_df["Sector Momentum Score"] = 0.0
+        ranked_df["Sector Relative Strength %"] = np.nan
         ranked_df["Relative Strength"] = np.nan
         ranked_df["Relative Strength Score"] = 0.0
         ranked_df["Entry Distance Score"] = 0.0
         ranked_df["Liquidity Score"] = 0.0
         ranked_df["RVOL Score"] = 0.0
+        ranked_df["Effective RVOL"] = np.nan
+        ranked_df["Intraday Liquidity Factor"] = 0.0
+        ranked_df["Gap Risk Penalty"] = 0.0
+        ranked_df["Fresh Breakout Bonus"] = 0.0
         ranked_df["Exhaustion Penalty"] = 0.0
+        ranked_df["Raw Ranking Score"] = pd.Series(dtype=float)
         ranked_df["Ranking Score"] = pd.Series(dtype=float)
         ranked_df["Sector"] = pd.Series(dtype=object)
         return ranked_df
     metrics = ranked_df.apply(calculate_entry_metrics, axis=1)
     ranked_df = pd.concat([ranked_df, metrics], axis=1)
+    ranked_df["Entry Distance %"] = pd.to_numeric(ranked_df["Entry Distance %"], errors="coerce")
+    ranked_df = ranked_df[
+        ranked_df["Entry Distance %"].notna()
+        & (ranked_df["Entry Distance %"] <= MAX_RANKED_ENTRY_GAP_PERCENT)
+    ].copy()
     ranked_df["Score"] = pd.to_numeric(ranked_df["Score"], errors="coerce").fillna(0)
     ranked_df["Sector"] = ranked_df["Symbol"].apply(get_stock_sector)
     ranked_df["Sector Performance %"] = ranked_df["Sector"].map(sector_momentum).fillna(0.0)
-    ranked_df["Sector Momentum Score"] = ranked_df["Sector Performance %"].apply(sector_momentum_adjustment)
+    ranked_df["Sector Relative Strength %"] = ranked_df["Sector Performance %"] - nifty_5d_return
+    ranked_df["Sector Momentum Score"] = ranked_df["Sector Relative Strength %"].apply(sector_momentum_adjustment)
     ranked_df["Recent Return"] = pd.to_numeric(ranked_df["Recent Return"], errors="coerce")
     ranked_df["Relative Strength"] = ranked_df["Recent Return"] - nifty_5d_return
     ranked_df["Relative Strength Score"] = ranked_df["Relative Strength"].apply(relative_strength_adjustment)
@@ -2691,21 +2868,44 @@ def add_entry_quality_columns(df, sector_momentum=None, nifty_5d_return=0.0):
         ranked_df["Latest Move %"] = np.nan
     if "EMA20 Distance %" not in ranked_df.columns:
         ranked_df["EMA20 Distance %"] = np.nan
+    if "Fresh Breakout Age" not in ranked_df.columns:
+        ranked_df["Fresh Breakout Age"] = np.nan
     ranked_df["Latest Move %"] = pd.to_numeric(ranked_df["Latest Move %"], errors="coerce")
     ranked_df["EMA20 Distance %"] = pd.to_numeric(ranked_df["EMA20 Distance %"], errors="coerce")
+    ranked_df["Fresh Breakout Age"] = pd.to_numeric(ranked_df["Fresh Breakout Age"], errors="coerce")
     ranked_df["Entry Distance Score"] = ranked_df["Entry Distance %"].apply(entry_distance_adjustment)
     ranked_df["Liquidity Score"] = ranked_df["Avg Volume Value"].apply(liquidity_adjustment)
-    ranked_df["RVOL Score"] = ranked_df["RVOL"].apply(rvol_adjustment)
-    ranked_df["Exhaustion Penalty"] = ranked_df.apply(momentum_exhaustion_penalty, axis=1)
-    raw_opportunity_score = (
-        (ranked_df["Relative Strength Score"] * RANKING_WEIGHTS["relative_strength"])
-        + (ranked_df["RVOL Score"] * RANKING_WEIGHTS["rvol"])
-        + (ranked_df["Sector Momentum Score"] * RANKING_WEIGHTS["sector"])
-        + (ranked_df["Liquidity Score"] * RANKING_WEIGHTS["liquidity"])
-        + (ranked_df["Entry Distance Score"] * RANKING_WEIGHTS["entry"])
-        + ranked_df["Exhaustion Penalty"]
+    if intraday:
+        ranked_df["Intraday Liquidity Factor"] = ranked_df["Avg Volume Value"].apply(intraday_liquidity_factor)
+        ranked_df["Effective RVOL"] = ranked_df["RVOL"] * ranked_df["Intraday Liquidity Factor"]
+        ranked_df["RVOL Score"] = ranked_df["Effective RVOL"].apply(rvol_adjustment)
+        ranked_df["Gap Risk Penalty"] = ranked_df.apply(intraday_gap_risk_penalty, axis=1)
+    else:
+        ranked_df["Intraday Liquidity Factor"] = 1.0
+        ranked_df["Effective RVOL"] = ranked_df["RVOL"]
+        ranked_df["RVOL Score"] = ranked_df["RVOL"].apply(rvol_adjustment)
+        ranked_df["Gap Risk Penalty"] = 0.0
+    ranked_df["Fresh Breakout Bonus"] = ranked_df.apply(fresh_breakout_bonus, axis=1)
+    ranked_df["Exhaustion Penalty"] = ranked_df.apply(
+        lambda row: momentum_exhaustion_penalty(row, intraday=intraday),
+        axis=1,
     )
-    ranked_df["Ranking Score"] = (raw_opportunity_score * OPPORTUNITY_SCORE_SCALE).round(1)
+    raw_opportunity_score = (
+        (ranked_df["Relative Strength Score"] * ranking_weights["relative_strength"])
+        + (ranked_df["RVOL Score"] * ranking_weights["rvol"])
+        + (ranked_df["Sector Momentum Score"] * ranking_weights["sector"])
+        + (ranked_df["Liquidity Score"] * ranking_weights["liquidity"])
+        + (ranked_df["Entry Distance Score"] * ranking_weights["entry"])
+        + ranked_df["Fresh Breakout Bonus"]
+        + ranked_df["Exhaustion Penalty"]
+        + ranked_df["Gap Risk Penalty"]
+    )
+    ranked_df["Raw Ranking Score"] = raw_opportunity_score.round(3)
+    ranked_df["Ranking Score"] = (
+        (raw_opportunity_score / OPPORTUNITY_SCORE_MAX_RAW)
+        .clip(lower=0, upper=1)
+        * OPPORTUNITY_SCORE_SCALE
+    ).round(1)
     return ranked_df
 
 def limit_top_picks_by_sector(df, max_per_sector=2, limit=5):
@@ -2773,6 +2973,8 @@ def format_compact_currency(value):
 
 def ranking_audit_text(row):
     exhaustion_penalty = to_number_or_none(row.get("Exhaustion Penalty")) or 0.0
+    gap_risk_penalty = to_number_or_none(row.get("Gap Risk Penalty")) or 0.0
+    fresh_breakout_bonus_value = to_number_or_none(row.get("Fresh Breakout Bonus")) or 0.0
     exhaustion_text = ""
     if exhaustion_penalty < 0:
         exhaustion_text = (
@@ -2780,22 +2982,45 @@ def ranking_audit_text(row):
             f"(Move: {format_percent(row.get('Latest Move %'))}, "
             f"EMA20 Gap: {format_percent(row.get('EMA20 Distance %'))})"
         )
+    gap_risk_text = ""
+    if gap_risk_penalty < 0:
+        gap_risk_text = (
+            f" | Gap Risk: {format_number(gap_risk_penalty, 1)} "
+            f"(Prev Day: {format_percent(row.get('Previous Day Move %'))}, "
+            f"Gap: {format_percent(row.get('Overnight Gap %'))})"
+        )
+
+    effective_rvol = to_number_or_none(row.get("Effective RVOL"))
+    rvol = to_number_or_none(row.get("RVOL"))
+    effective_rvol_text = ""
+    if effective_rvol is not None and rvol is not None and abs(effective_rvol - rvol) > 0.01:
+        effective_rvol_text = f", effective {format_number(effective_rvol)}"
+
+    fresh_breakout_text = ""
+    if fresh_breakout_bonus_value > 0:
+        fresh_breakout_text = (
+            f" | Fresh Breakout: +{format_number(fresh_breakout_bonus_value, 1)} "
+            f"({format_number(row.get('Fresh Breakout Age'), 0)} candles)"
+        )
 
     return (
         f"Opportunity Score: {format_number(row.get('Ranking Score'))} | "
         f"RS: {format_percent(row.get('Relative Strength'))} "
         f"({format_number(row.get('Relative Strength Score'), 1)}) | "
         f"RVOL: {format_number(row.get('RVOL'))} "
-        f"({format_number(row.get('RVOL Score'), 1)}) | "
+        f"({format_number(row.get('RVOL Score'), 1)}{effective_rvol_text}) | "
         f"Sector: {row.get('Sector', 'Other')} "
         f"{format_percent(row.get('Sector Performance %'))} "
+        f"(Rel: {format_percent(row.get('Sector Relative Strength %'))}) "
         f"({format_number(row.get('Sector Momentum Score'), 1)}) | "
         f"RR: {format_number(row.get('Reward/Risk'))} | "
         f"Entry Gap: {format_percent(row.get('Entry Distance %'))} "
         f"({format_number(row.get('Entry Distance Score'), 1)}) | "
         f"Liquidity: {format_compact_currency(row.get('Avg Volume Value'))} "
         f"({format_number(row.get('Liquidity Score'), 1)})"
+        f"{fresh_breakout_text}"
         f"{exhaustion_text}"
+        f"{gap_risk_text}"
     )
 
 def update_progress(progress_bar, loading_text, progress_value, loading_messages):
@@ -3008,10 +3233,10 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                         Intraday: {colored_recommendation(row.get('Intraday', 'N/A'))}
                         
                         **Strategy Notes:**
-                        {row.get('Pattern Notes') or 'Standard Technical Setup'}
+                        {clean_display_text(row.get('Pattern Notes'))}
                         
                         **Entry Advice:**
-                        {row.get('Entry Strategy') or 'Standard Entry (Risk 1-2%)'}
+                        {clean_display_text(row.get('Entry Strategy'))}
                         """)
         else:
             st.warning("⚠️ No intraday picks available due to data issues.")
