@@ -140,7 +140,9 @@ FRESH_BREAKOUT_MAX_AGE = 3
 FRESH_BREAKOUT_RANKING_BONUS = 0.5
 MIN_INTRADAY_LIQUIDITY_CR = 10
 MIN_INTRADAY_LIQUIDITY_VALUE = MIN_INTRADAY_LIQUIDITY_CR * 10_000_000
+MIN_INTRADAY_RS = 1.0
 MIN_INTRADAY_BREAKOUT_RS = 2.5
+MIN_INTRADAY_SECTOR_RELATIVE_STRENGTH = 0.25
 EXHAUSTION_RVOL_THRESHOLD = 5.0
 EXHAUSTION_EMA20_DISTANCE_THRESHOLD = 8.0
 EXHAUSTION_DAILY_MOVE_THRESHOLD = 8.0
@@ -2715,6 +2717,16 @@ def rvol_adjustment(rvol):
         return 1.0
     return 0.0
 
+def intraday_rvol_adjustment(rvol):
+    rvol = to_number_or_none(rvol)
+    if rvol is None:
+        return 0.0
+    if rvol > 3:
+        return 2.0
+    if rvol > 2:
+        return 1.0
+    return 0.0
+
 def intraday_liquidity_factor(avg_volume_value):
     avg_volume_value = to_number_or_none(avg_volume_value)
     if avg_volume_value is None or avg_volume_value <= 0:
@@ -2782,9 +2794,11 @@ def is_intraday_quality_setup(row):
     sector_perf = to_number_or_none(row.get("Sector Relative Strength %"))
     is_breakout = entry_type == "breakout"
 
-    if is_breakout and (relative_strength is None or relative_strength <= MIN_INTRADAY_BREAKOUT_RS):
+    if relative_strength is None or relative_strength <= MIN_INTRADAY_RS:
         return False
-    if is_breakout and sector_perf is not None and sector_perf < 0:
+    if sector_perf is None or sector_perf <= MIN_INTRADAY_SECTOR_RELATIVE_STRENGTH:
+        return False
+    if is_breakout and (relative_strength is None or relative_strength <= MIN_INTRADAY_BREAKOUT_RS):
         return False
     return True
 
@@ -2878,7 +2892,7 @@ def add_entry_quality_columns(
     if intraday:
         ranked_df["Intraday Liquidity Factor"] = ranked_df["Avg Volume Value"].apply(intraday_liquidity_factor)
         ranked_df["Effective RVOL"] = ranked_df["RVOL"] * ranked_df["Intraday Liquidity Factor"]
-        ranked_df["RVOL Score"] = ranked_df["Effective RVOL"].apply(rvol_adjustment)
+        ranked_df["RVOL Score"] = ranked_df["Effective RVOL"].apply(intraday_rvol_adjustment)
         ranked_df["Gap Risk Penalty"] = ranked_df.apply(intraday_gap_risk_penalty, axis=1)
     else:
         ranked_df["Intraday Liquidity Factor"] = 1.0
