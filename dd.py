@@ -129,7 +129,7 @@ OPPORTUNITY_SCORE_SCALE = 100
 EXHAUSTION_RVOL_THRESHOLD = 5.0
 EXHAUSTION_EMA20_DISTANCE_THRESHOLD = 8.0
 EXHAUSTION_DAILY_MOVE_THRESHOLD = 8.0
-EXHAUSTION_RANKING_PENALTY = -1.0
+MAX_EXHAUSTION_RANKING_PENALTY = 2.0
 
 TOOLTIPS = {
     "RSI": "Relative Strength Index (30=Oversold, 70=Overbought)",
@@ -2611,17 +2611,24 @@ def momentum_exhaustion_penalty(row):
     if rvol is None or rvol <= EXHAUSTION_RVOL_THRESHOLD:
         return 0.0
 
-    is_extended_from_ema = (
-        ema20_distance_pct is not None
-        and ema20_distance_pct > EXHAUSTION_EMA20_DISTANCE_THRESHOLD
+    move_excess = max(
+        0.0,
+        (latest_move_pct or 0.0) - EXHAUSTION_DAILY_MOVE_THRESHOLD
     )
-    is_large_daily_move = (
-        latest_move_pct is not None
-        and latest_move_pct > EXHAUSTION_DAILY_MOVE_THRESHOLD
+    ema_excess = max(
+        0.0,
+        (ema20_distance_pct or 0.0) - EXHAUSTION_EMA20_DISTANCE_THRESHOLD
     )
-    if is_extended_from_ema or is_large_daily_move:
-        return EXHAUSTION_RANKING_PENALTY
-    return 0.0
+    extension_excess = max(move_excess, ema_excess)
+    if extension_excess <= 0:
+        return 0.0
+
+    penalty = min(
+        MAX_EXHAUSTION_RANKING_PENALTY,
+        ((rvol - EXHAUSTION_RVOL_THRESHOLD) * 0.25)
+        + (extension_excess * 0.15)
+    )
+    return -round(penalty, 2)
 
 def calculate_entry_metrics(row, max_distance_pct=0.08):
     current_price = to_float_or_none(row.get("Current Price"))
