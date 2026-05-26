@@ -126,6 +126,10 @@ RANKING_WEIGHTS = {
     "entry": 0.10,
 }
 OPPORTUNITY_SCORE_SCALE = 100
+EXHAUSTION_RVOL_THRESHOLD = 5.0
+EXHAUSTION_EMA20_DISTANCE_THRESHOLD = 8.0
+EXHAUSTION_DAILY_MOVE_THRESHOLD = 8.0
+EXHAUSTION_RANKING_PENALTY = -1.0
 
 TOOLTIPS = {
     "RSI": "Relative Strength Index (30=Oversold, 70=Overbought)",
@@ -2084,6 +2088,7 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
         
         data = analyze_stock(data, interval=interval)
         recent_return = calculate_recent_return(data)
+        latest_move_pct, ema20_distance_pct = calculate_momentum_extension_metrics(data)
         rvol, avg_volume_value = calculate_volume_metrics(data)
         logging.info(f"Analyzing {symbol} in {recommendation_mode} mode")
         
@@ -2121,6 +2126,8 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
                 "Status": "Success",
                 "Current Price": rec.get("Current Price"),
                 "Recent Return": recent_return,
+                "Latest Move %": latest_move_pct,
+                "EMA20 Distance %": ema20_distance_pct,
                 "RVOL": rvol,
                 "Avg Volume Value": avg_volume_value,
                 "Buy At": rec.get("Buy At"),
@@ -2179,6 +2186,8 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
                 "Status": "Success",
                 "Current Price": rec.get("Current Price"),
                 "Recent Return": recent_return,
+                "Latest Move %": latest_move_pct,
+                "EMA20 Distance %": ema20_distance_pct,
                 "RVOL": rvol,
                 "Avg Volume Value": avg_volume_value,
                 "Buy At": rec.get("Buy At"),
@@ -2233,7 +2242,8 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
     
     # Fill missing columns for consistent structure
     expected_cols = [
-        "Symbol", "Score", "Current Price", "Recent Return", "RVOL", "Avg Volume Value",
+        "Symbol", "Score", "Current Price", "Recent Return", "Latest Move %",
+        "EMA20 Distance %", "RVOL", "Avg Volume Value",
         "Buy At", "Stop Loss", "Target", "Recommendation", "Intraday", "Swing", "Short-Term",
         "Long-Term", "Mean_Reversion", "Breakout", "Ichimoku_Trend", "Major Trend Conflict",
         "Status", "Error"
@@ -2352,7 +2362,8 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
     
     # Ensure all required columns exist to avoid KeyError
     expected_cols = [
-        "Symbol", "Score", "Current Price", "Recent Return", "RVOL", "Avg Volume Value",
+        "Symbol", "Score", "Current Price", "Recent Return", "Latest Move %",
+        "EMA20 Distance %", "RVOL", "Avg Volume Value",
         "Intraday", "Recommendation", "Buy At", "Stop Loss", "Target",
         "Ichimoku_Trend", "Major Trend Conflict"
     ]
@@ -2437,6 +2448,25 @@ def calculate_recent_return(data, candles=5):
     if not first_close or not last_close:
         return np.nan
     return ((last_close - first_close) / first_close) * 100
+
+def calculate_momentum_extension_metrics(data):
+    if data.empty or "Close" not in data.columns or len(data) < 2:
+        return np.nan, np.nan
+
+    previous_close = to_float_or_none(data["Close"].iloc[-2])
+    current_close = to_float_or_none(data["Close"].iloc[-1])
+    if not previous_close or not current_close:
+        latest_move_pct = np.nan
+    else:
+        latest_move_pct = ((current_close - previous_close) / previous_close) * 100
+
+    ema20_distance_pct = np.nan
+    if "EMA_20" in data.columns:
+        ema20 = to_float_or_none(data["EMA_20"].iloc[-1])
+        if ema20 and current_close:
+            ema20_distance_pct = ((current_close - ema20) / ema20) * 100
+
+    return latest_move_pct, ema20_distance_pct
 
 def calculate_volume_metrics(data):
     if data.empty or not {"Close", "Volume"}.issubset(data.columns):
@@ -2574,6 +2604,25 @@ def rvol_adjustment(rvol):
         return 1.0
     return 0.0
 
+def momentum_exhaustion_penalty(row):
+    rvol = to_number_or_none(row.get("RVOL"))
+    latest_move_pct = to_number_or_none(row.get("Latest Move %"))
+    ema20_distance_pct = to_number_or_none(row.get("EMA20 Distance %"))
+    if rvol is None or rvol <= EXHAUSTION_RVOL_THRESHOLD:
+        return 0.0
+
+    is_extended_from_ema = (
+        ema20_distance_pct is not None
+        and ema20_distance_pct > EXHAUSTION_EMA20_DISTANCE_THRESHOLD
+    )
+    is_large_daily_move = (
+        latest_move_pct is not None
+        and latest_move_pct > EXHAUSTION_DAILY_MOVE_THRESHOLD
+    )
+    if is_extended_from_ema or is_large_daily_move:
+        return EXHAUSTION_RANKING_PENALTY
+    return 0.0
+
 def calculate_entry_metrics(row, max_distance_pct=0.08):
     current_price = to_float_or_none(row.get("Current Price"))
     buy_at = to_float_or_none(row.get("Buy At"))
@@ -2616,6 +2665,7 @@ def add_entry_quality_columns(df, sector_momentum=None, nifty_5d_return=0.0):
         ranked_df["Entry Distance Score"] = 0.0
         ranked_df["Liquidity Score"] = 0.0
         ranked_df["RVOL Score"] = 0.0
+        ranked_df["Exhaustion Penalty"] = 0.0
         ranked_df["Ranking Score"] = pd.Series(dtype=float)
         ranked_df["Sector"] = pd.Series(dtype=object)
         return ranked_df
@@ -2630,15 +2680,23 @@ def add_entry_quality_columns(df, sector_momentum=None, nifty_5d_return=0.0):
     ranked_df["Relative Strength Score"] = ranked_df["Relative Strength"].apply(relative_strength_adjustment)
     ranked_df["RVOL"] = pd.to_numeric(ranked_df["RVOL"], errors="coerce")
     ranked_df["Avg Volume Value"] = pd.to_numeric(ranked_df["Avg Volume Value"], errors="coerce")
+    if "Latest Move %" not in ranked_df.columns:
+        ranked_df["Latest Move %"] = np.nan
+    if "EMA20 Distance %" not in ranked_df.columns:
+        ranked_df["EMA20 Distance %"] = np.nan
+    ranked_df["Latest Move %"] = pd.to_numeric(ranked_df["Latest Move %"], errors="coerce")
+    ranked_df["EMA20 Distance %"] = pd.to_numeric(ranked_df["EMA20 Distance %"], errors="coerce")
     ranked_df["Entry Distance Score"] = ranked_df["Entry Distance %"].apply(entry_distance_adjustment)
     ranked_df["Liquidity Score"] = ranked_df["Avg Volume Value"].apply(liquidity_adjustment)
     ranked_df["RVOL Score"] = ranked_df["RVOL"].apply(rvol_adjustment)
+    ranked_df["Exhaustion Penalty"] = ranked_df.apply(momentum_exhaustion_penalty, axis=1)
     raw_opportunity_score = (
         (ranked_df["Relative Strength Score"] * RANKING_WEIGHTS["relative_strength"])
         + (ranked_df["RVOL Score"] * RANKING_WEIGHTS["rvol"])
         + (ranked_df["Sector Momentum Score"] * RANKING_WEIGHTS["sector"])
         + (ranked_df["Liquidity Score"] * RANKING_WEIGHTS["liquidity"])
         + (ranked_df["Entry Distance Score"] * RANKING_WEIGHTS["entry"])
+        + ranked_df["Exhaustion Penalty"]
     )
     ranked_df["Ranking Score"] = (raw_opportunity_score * OPPORTUNITY_SCORE_SCALE).round(1)
     return ranked_df
@@ -2707,6 +2765,15 @@ def format_compact_currency(value):
     return f"₹{value:.0f}"
 
 def ranking_audit_text(row):
+    exhaustion_penalty = to_number_or_none(row.get("Exhaustion Penalty")) or 0.0
+    exhaustion_text = ""
+    if exhaustion_penalty < 0:
+        exhaustion_text = (
+            f" | Exhaustion: {format_number(exhaustion_penalty, 1)} "
+            f"(Move: {format_percent(row.get('Latest Move %'))}, "
+            f"EMA20 Gap: {format_percent(row.get('EMA20 Distance %'))})"
+        )
+
     return (
         f"Opportunity Score: {format_number(row.get('Ranking Score'))} | "
         f"RS: {format_percent(row.get('Relative Strength'))} "
@@ -2721,6 +2788,7 @@ def ranking_audit_text(row):
         f"({format_number(row.get('Entry Distance Score'), 1)}) | "
         f"Liquidity: {format_compact_currency(row.get('Avg Volume Value'))} "
         f"({format_number(row.get('Liquidity Score'), 1)})"
+        f"{exhaustion_text}"
     )
 
 def update_progress(progress_bar, loading_text, progress_value, loading_messages):
