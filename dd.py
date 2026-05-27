@@ -3158,17 +3158,20 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
 
     # Sector selection
     sector_options = ["All"] + list(SECTORS.keys())
-    st.session_state.selected_sectors = st.sidebar.multiselect(
+    st.session_state.selected_sectors = [
+        sector for sector in st.session_state.selected_sectors if sector in sector_options
+    ]
+    selected_sectors = st.sidebar.multiselect(
         "Select Sectors",
         options=sector_options,
-        default=st.session_state.selected_sectors,
+        key="selected_sectors",
         help="Choose one or more sectors to analyze. Select 'All' to include all sectors."
     )
 
-    if "All" in st.session_state.selected_sectors:
+    if "All" in selected_sectors:
         selected_stocks = list(set([stock for sector in SECTORS.values() for stock in sector]))
     else:
-        selected_stocks = list(set([stock for sector in st.session_state.selected_sectors for stock in SECTORS.get(sector, [])]))
+        selected_stocks = list(set([stock for sector in selected_sectors for stock in SECTORS.get(sector, [])]))
 
     if not selected_stocks:
         st.warning("⚠️ No stocks selected. Please choose at least one sector.")
