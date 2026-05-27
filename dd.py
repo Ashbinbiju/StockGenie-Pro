@@ -138,6 +138,10 @@ MAX_RANKED_ENTRY_GAP_PERCENT = 3.0
 FRESH_BREAKOUT_LOOKBACK = 20
 FRESH_BREAKOUT_MAX_AGE = 3
 FRESH_BREAKOUT_RANKING_BONUS = 0.5
+SECTOR_EXHAUSTION_MOVE_THRESHOLD = 10.0
+SECTOR_EXHAUSTION_RANKING_PENALTY = 0.5
+TREND_PERSISTENCE_LOOKBACK = 5
+MAX_TREND_PERSISTENCE_RANKING_ADJUSTMENT = 0.4
 MIN_INTRADAY_LIQUIDITY_CR = 10
 MIN_INTRADAY_LIQUIDITY_VALUE = MIN_INTRADAY_LIQUIDITY_CR * 10_000_000
 MIN_INTRADAY_RS = 1.0
@@ -2118,6 +2122,7 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
         
         data = analyze_stock(data, interval=interval)
         recent_return = calculate_recent_return(data)
+        trend_persistence = calculate_trend_persistence_score(data)
         latest_move_pct, ema20_distance_pct = calculate_momentum_extension_metrics(data)
         previous_day_move_pct, overnight_gap_pct = calculate_session_gap_metrics(data)
         fresh_breakout_age = calculate_fresh_breakout_age(data)
@@ -2158,6 +2163,7 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
                 "Status": "Success",
                 "Current Price": rec.get("Current Price"),
                 "Recent Return": recent_return,
+                "Trend Persistence": trend_persistence,
                 "Latest Move %": latest_move_pct,
                 "Previous Day Move %": previous_day_move_pct,
                 "Overnight Gap %": overnight_gap_pct,
@@ -2221,6 +2227,7 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
                 "Status": "Success",
                 "Current Price": rec.get("Current Price"),
                 "Recent Return": recent_return,
+                "Trend Persistence": trend_persistence,
                 "Latest Move %": latest_move_pct,
                 "Previous Day Move %": previous_day_move_pct,
                 "Overnight Gap %": overnight_gap_pct,
@@ -2280,7 +2287,7 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
     
     # Fill missing columns for consistent structure
     expected_cols = [
-        "Symbol", "Score", "Current Price", "Recent Return", "Latest Move %",
+        "Symbol", "Score", "Current Price", "Recent Return", "Trend Persistence", "Latest Move %",
         "EMA20 Distance %", "Fresh Breakout Age", "RVOL", "Avg Volume Value",
         "Buy At", "Stop Loss", "Target", "Recommendation", "Intraday", "Swing", "Short-Term",
         "Long-Term", "Mean_Reversion", "Breakout", "Ichimoku_Trend", "Major Trend Conflict",
@@ -2400,7 +2407,7 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
     
     # Ensure all required columns exist to avoid KeyError
     expected_cols = [
-        "Symbol", "Score", "Current Price", "Recent Return", "Latest Move %",
+        "Symbol", "Score", "Current Price", "Recent Return", "Trend Persistence", "Latest Move %",
         "Previous Day Move %", "Overnight Gap %", "EMA20 Distance %", "Fresh Breakout Age", "RVOL", "Avg Volume Value",
         "Intraday", "Recommendation", "Buy At", "Stop Loss", "Target",
         "Ichimoku_Trend", "Major Trend Conflict", "Entry Type"
@@ -2510,6 +2517,35 @@ def calculate_recent_return(data, candles=5):
     if not first_close or not last_close:
         return np.nan
     return ((last_close - first_close) / first_close) * 100
+
+def calculate_trend_persistence_score(data, candles=TREND_PERSISTENCE_LOOKBACK):
+    if data.empty or not {"High", "Low", "Close"}.issubset(data.columns) or len(data) < candles:
+        return np.nan
+
+    window = data.tail(candles).copy()
+    highs = pd.to_numeric(window["High"], errors="coerce")
+    lows = pd.to_numeric(window["Low"], errors="coerce")
+    closes = pd.to_numeric(window["Close"], errors="coerce")
+    if highs.isna().any() or lows.isna().any() or closes.isna().any():
+        return np.nan
+
+    candle_range = (highs - lows).replace(0, np.nan)
+    close_location = ((closes - lows) / candle_range).clip(0, 1).mean()
+    close_changes = closes.diff().dropna()
+    if close_changes.empty:
+        return np.nan
+
+    advancing_close_rate = (close_changes > 0).mean()
+    path_length = close_changes.abs().sum()
+    smoothness = abs(closes.iloc[-1] - closes.iloc[0]) / path_length if path_length else 0.0
+    smoothness = min(max(smoothness, 0.0), 1.0)
+
+    persistence_score = (
+        (close_location * 0.45)
+        + (advancing_close_rate * 0.35)
+        + (smoothness * 0.20)
+    ) * 100
+    return round(float(persistence_score), 1)
 
 def calculate_momentum_extension_metrics(data):
     if data.empty or "Close" not in data.columns or len(data) < 2:
@@ -2753,6 +2789,28 @@ def fresh_breakout_bonus(row):
         return FRESH_BREAKOUT_RANKING_BONUS
     return 0.0
 
+def sector_exhaustion_penalty(row, intraday=False):
+    if intraday:
+        return 0.0
+    sector_perf = to_number_or_none(row.get("Sector Performance %"))
+    if sector_perf is None or sector_perf <= SECTOR_EXHAUSTION_MOVE_THRESHOLD:
+        return 0.0
+    return -SECTOR_EXHAUSTION_RANKING_PENALTY
+
+def trend_persistence_adjustment(row):
+    trend_persistence = to_number_or_none(row.get("Trend Persistence"))
+    if trend_persistence is None:
+        return 0.0
+    centered_score = (trend_persistence - 50.0) / 50.0
+    adjustment = centered_score * MAX_TREND_PERSISTENCE_RANKING_ADJUSTMENT
+    return round(
+        max(
+            -MAX_TREND_PERSISTENCE_RANKING_ADJUSTMENT,
+            min(MAX_TREND_PERSISTENCE_RANKING_ADJUSTMENT, adjustment),
+        ),
+        2,
+    )
+
 def momentum_exhaustion_penalty(row, intraday=False):
     rvol = to_number_or_none(row.get("RVOL"))
     latest_move_pct = to_number_or_none(row.get("Latest Move %"))
@@ -2856,6 +2914,8 @@ def add_entry_quality_columns(
         ranked_df["Intraday Liquidity Factor"] = 0.0
         ranked_df["Gap Risk Penalty"] = 0.0
         ranked_df["Fresh Breakout Bonus"] = 0.0
+        ranked_df["Sector Exhaustion Penalty"] = 0.0
+        ranked_df["Trend Persistence Adjustment"] = 0.0
         ranked_df["Exhaustion Penalty"] = 0.0
         ranked_df["Raw Ranking Score"] = pd.Series(dtype=float)
         ranked_df["Ranking Score"] = pd.Series(dtype=float)
@@ -2876,6 +2936,9 @@ def add_entry_quality_columns(
     ranked_df["Recent Return"] = pd.to_numeric(ranked_df["Recent Return"], errors="coerce")
     ranked_df["Relative Strength"] = ranked_df["Recent Return"] - nifty_5d_return
     ranked_df["Relative Strength Score"] = ranked_df["Relative Strength"].apply(relative_strength_adjustment)
+    if "Trend Persistence" not in ranked_df.columns:
+        ranked_df["Trend Persistence"] = np.nan
+    ranked_df["Trend Persistence"] = pd.to_numeric(ranked_df["Trend Persistence"], errors="coerce")
     ranked_df["RVOL"] = pd.to_numeric(ranked_df["RVOL"], errors="coerce")
     ranked_df["Avg Volume Value"] = pd.to_numeric(ranked_df["Avg Volume Value"], errors="coerce")
     if "Latest Move %" not in ranked_df.columns:
@@ -2900,6 +2963,11 @@ def add_entry_quality_columns(
         ranked_df["RVOL Score"] = ranked_df["RVOL"].apply(rvol_adjustment)
         ranked_df["Gap Risk Penalty"] = 0.0
     ranked_df["Fresh Breakout Bonus"] = ranked_df.apply(fresh_breakout_bonus, axis=1)
+    ranked_df["Sector Exhaustion Penalty"] = ranked_df.apply(
+        lambda row: sector_exhaustion_penalty(row, intraday=intraday),
+        axis=1,
+    )
+    ranked_df["Trend Persistence Adjustment"] = ranked_df.apply(trend_persistence_adjustment, axis=1)
     ranked_df["Exhaustion Penalty"] = ranked_df.apply(
         lambda row: momentum_exhaustion_penalty(row, intraday=intraday),
         axis=1,
@@ -2911,6 +2979,8 @@ def add_entry_quality_columns(
         + (ranked_df["Liquidity Score"] * ranking_weights["liquidity"])
         + (ranked_df["Entry Distance Score"] * ranking_weights["entry"])
         + ranked_df["Fresh Breakout Bonus"]
+        + ranked_df["Trend Persistence Adjustment"]
+        + ranked_df["Sector Exhaustion Penalty"]
         + ranked_df["Exhaustion Penalty"]
         + ranked_df["Gap Risk Penalty"]
     )
@@ -2989,6 +3059,8 @@ def ranking_audit_text(row):
     exhaustion_penalty = to_number_or_none(row.get("Exhaustion Penalty")) or 0.0
     gap_risk_penalty = to_number_or_none(row.get("Gap Risk Penalty")) or 0.0
     fresh_breakout_bonus_value = to_number_or_none(row.get("Fresh Breakout Bonus")) or 0.0
+    sector_exhaustion_penalty_value = to_number_or_none(row.get("Sector Exhaustion Penalty")) or 0.0
+    trend_persistence_adjustment_value = to_number_or_none(row.get("Trend Persistence Adjustment")) or 0.0
     exhaustion_text = ""
     if exhaustion_penalty < 0:
         exhaustion_text = (
@@ -3016,6 +3088,19 @@ def ranking_audit_text(row):
             f" | Fresh Breakout: +{format_number(fresh_breakout_bonus_value, 1)} "
             f"({format_number(row.get('Fresh Breakout Age'), 0)} candles)"
         )
+    sector_exhaustion_text = ""
+    if sector_exhaustion_penalty_value < 0:
+        sector_exhaustion_text = (
+            f" | Sector Exhaustion: {format_number(sector_exhaustion_penalty_value, 1)} "
+            f"({format_percent(row.get('Sector Performance %'))})"
+        )
+
+    trend_persistence_text = ""
+    if abs(trend_persistence_adjustment_value) > 0:
+        trend_persistence_text = (
+            f" | Persistence: {format_number(row.get('Trend Persistence'), 1)} "
+            f"({format_number(trend_persistence_adjustment_value, 1)})"
+        )
 
     return (
         f"Opportunity Score: {format_number(row.get('Ranking Score'))} | "
@@ -3033,6 +3118,8 @@ def ranking_audit_text(row):
         f"Liquidity: {format_compact_currency(row.get('Avg Volume Value'))} "
         f"({format_number(row.get('Liquidity Score'), 1)})"
         f"{fresh_breakout_text}"
+        f"{trend_persistence_text}"
+        f"{sector_exhaustion_text}"
         f"{exhaustion_text}"
         f"{gap_risk_text}"
     )
