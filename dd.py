@@ -136,11 +136,16 @@ OPPORTUNITY_SCORE_CURVE_SCALE = 1.25
 MAX_RANKED_ENTRY_GAP_PERCENT = 3.0
 FRESH_BREAKOUT_LOOKBACK = 20
 FRESH_BREAKOUT_MAX_AGE = 3
-FRESH_BREAKOUT_RANKING_BONUS = 0.5
+FRESH_BREAKOUT_DECAY_BONUSES = {
+    1: 0.5,
+    2: 0.3,
+    3: 0.1,
+}
 SECTOR_EXHAUSTION_MOVE_THRESHOLD = 10.0
 SECTOR_EXHAUSTION_RANKING_PENALTY = 0.5
 TREND_PERSISTENCE_LOOKBACK = 5
 MAX_TREND_PERSISTENCE_RANKING_ADJUSTMENT = 0.8
+MAX_SECTOR_LEADER_RANKING_ADJUSTMENT = 0.6
 MIN_INTRADAY_LIQUIDITY_CR = 10
 MIN_INTRADAY_LIQUIDITY_VALUE = MIN_INTRADAY_LIQUIDITY_CR * 10_000_000
 MIN_INTRADAY_RS = 1.0
@@ -2804,9 +2809,7 @@ def fresh_breakout_bonus(row):
     breakout_age = to_number_or_none(row.get("Fresh Breakout Age"))
     if breakout_age is None:
         return 0.0
-    if 1 <= breakout_age <= FRESH_BREAKOUT_MAX_AGE:
-        return FRESH_BREAKOUT_RANKING_BONUS
-    return 0.0
+    return FRESH_BREAKOUT_DECAY_BONUSES.get(int(breakout_age), 0.0)
 
 def sector_exhaustion_penalty(row, intraday=False):
     if intraday:
@@ -2834,6 +2837,43 @@ def normalize_opportunity_score(raw_score):
     return OPPORTUNITY_SCORE_SCALE * (
         1 - np.exp(-np.maximum(raw_score, 0) / OPPORTUNITY_SCORE_CURVE_SCALE)
     )
+
+def sector_leader_adjustment_columns(ranked_df):
+    ranked_df["Sector Leader Score"] = 0.5
+    ranked_df["Sector Leader Adjustment"] = 0.0
+    if ranked_df.empty:
+        return ranked_df
+
+    metrics = ["Relative Strength", "Avg Volume Value", "Trend Persistence"]
+    for metric in metrics:
+        ranked_df[metric] = pd.to_numeric(ranked_df[metric], errors="coerce")
+
+    for _, sector_df in ranked_df.groupby("Sector", dropna=False):
+        if len(sector_df) < 2:
+            continue
+
+        metric_ranks = []
+        for metric in metrics:
+            values = sector_df[metric].fillna(sector_df[metric].min())
+            if values.isna().all() or values.nunique(dropna=False) <= 1:
+                metric_ranks.append(pd.Series(0.5, index=sector_df.index))
+                continue
+            zero_to_one_rank = (values.rank(method="average") - 1) / (len(values) - 1)
+            metric_ranks.append(zero_to_one_rank)
+
+        leader_score = sum(metric_ranks) / len(metric_ranks)
+        leader_adjustment = (
+            (leader_score - 0.5)
+            * 2
+            * MAX_SECTOR_LEADER_RANKING_ADJUSTMENT
+        ).clip(
+            lower=-MAX_SECTOR_LEADER_RANKING_ADJUSTMENT,
+            upper=MAX_SECTOR_LEADER_RANKING_ADJUSTMENT,
+        )
+        ranked_df.loc[sector_df.index, "Sector Leader Score"] = leader_score.round(2)
+        ranked_df.loc[sector_df.index, "Sector Leader Adjustment"] = leader_adjustment.round(2)
+
+    return ranked_df
 
 def momentum_exhaustion_penalty(row, intraday=False):
     rvol = to_number_or_none(row.get("RVOL"))
@@ -2947,6 +2987,8 @@ def add_entry_quality_columns(
         ranked_df["Fresh Breakout Bonus"] = 0.0
         ranked_df["Sector Exhaustion Penalty"] = 0.0
         ranked_df["Trend Persistence Adjustment"] = 0.0
+        ranked_df["Sector Leader Score"] = 0.5
+        ranked_df["Sector Leader Adjustment"] = 0.0
         ranked_df["Exhaustion Penalty"] = 0.0
         ranked_df["Raw Ranking Score"] = pd.Series(dtype=float)
         ranked_df["Ranking Score"] = pd.Series(dtype=float)
@@ -2999,6 +3041,7 @@ def add_entry_quality_columns(
         axis=1,
     )
     ranked_df["Trend Persistence Adjustment"] = ranked_df.apply(trend_persistence_adjustment, axis=1)
+    ranked_df = sector_leader_adjustment_columns(ranked_df)
     ranked_df["Exhaustion Penalty"] = ranked_df.apply(
         lambda row: momentum_exhaustion_penalty(row, intraday=intraday),
         axis=1,
@@ -3011,6 +3054,7 @@ def add_entry_quality_columns(
         + (ranked_df["Entry Distance Score"] * ranking_weights["entry"])
         + ranked_df["Fresh Breakout Bonus"]
         + ranked_df["Trend Persistence Adjustment"]
+        + ranked_df["Sector Leader Adjustment"]
         + ranked_df["Sector Exhaustion Penalty"]
         + ranked_df["Exhaustion Penalty"]
         + ranked_df["Gap Risk Penalty"]
@@ -3088,6 +3132,7 @@ def ranking_audit_text(row):
     fresh_breakout_bonus_value = to_number_or_none(row.get("Fresh Breakout Bonus")) or 0.0
     sector_exhaustion_penalty_value = to_number_or_none(row.get("Sector Exhaustion Penalty")) or 0.0
     trend_persistence_adjustment_value = to_number_or_none(row.get("Trend Persistence Adjustment")) or 0.0
+    sector_leader_adjustment_value = to_number_or_none(row.get("Sector Leader Adjustment")) or 0.0
     exhaustion_text = ""
     if exhaustion_penalty < 0:
         exhaustion_text = (
@@ -3129,6 +3174,13 @@ def ranking_audit_text(row):
             f"({format_number(trend_persistence_adjustment_value, 1)})"
         )
 
+    sector_leader_text = ""
+    if abs(sector_leader_adjustment_value) > 0:
+        sector_leader_text = (
+            f" | Sector Leader: {format_number(row.get('Sector Leader Score'), 2)} "
+            f"({format_number(sector_leader_adjustment_value, 1)})"
+        )
+
     return (
         f"Opportunity Score: {format_number(row.get('Ranking Score'))} | "
         f"RS: {format_percent(row.get('Relative Strength'))} "
@@ -3146,6 +3198,7 @@ def ranking_audit_text(row):
         f"({format_number(row.get('Liquidity Score'), 1)})"
         f"{fresh_breakout_text}"
         f"{trend_persistence_text}"
+        f"{sector_leader_text}"
         f"{sector_exhaustion_text}"
         f"{exhaustion_text}"
         f"{gap_risk_text}"
