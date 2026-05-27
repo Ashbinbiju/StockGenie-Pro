@@ -12,7 +12,6 @@ import plotly.express as px
 import time
 import requests
 import io
-import math
 import random
 import spacy
 from pytrends.request import TrendReq
@@ -133,7 +132,7 @@ INTRADAY_RANKING_WEIGHTS = {
     "relative_strength": 0.10,
 }
 OPPORTUNITY_SCORE_SCALE = 100
-OPPORTUNITY_SCORE_MAX_RAW = 2.0
+OPPORTUNITY_SCORE_CURVE_SCALE = 1.25
 MAX_RANKED_ENTRY_GAP_PERCENT = 3.0
 FRESH_BREAKOUT_LOOKBACK = 20
 FRESH_BREAKOUT_MAX_AGE = 3
@@ -141,7 +140,7 @@ FRESH_BREAKOUT_RANKING_BONUS = 0.5
 SECTOR_EXHAUSTION_MOVE_THRESHOLD = 10.0
 SECTOR_EXHAUSTION_RANKING_PENALTY = 0.5
 TREND_PERSISTENCE_LOOKBACK = 5
-MAX_TREND_PERSISTENCE_RANKING_ADJUSTMENT = 0.4
+MAX_TREND_PERSISTENCE_RANKING_ADJUSTMENT = 0.8
 MIN_INTRADAY_LIQUIDITY_CR = 10
 MIN_INTRADAY_LIQUIDITY_VALUE = MIN_INTRADAY_LIQUIDITY_CR * 10_000_000
 MIN_INTRADAY_RS = 1.0
@@ -2744,9 +2743,19 @@ def liquidity_adjustment(avg_volume_value):
     if avg_volume_value is None or avg_volume_value <= 0:
         return 0.0
     turnover_cr = avg_volume_value / 10_000_000
-    if turnover_cr <= 0:
+    if turnover_cr < 10:
         return 0.0
-    return min(math.log10(turnover_cr) / 2, 2.0)
+    if turnover_cr < 20:
+        return 0.3
+    if turnover_cr < 50:
+        return 0.6
+    if turnover_cr < 100:
+        return 1.0
+    if turnover_cr < 250:
+        return 1.3
+    if turnover_cr < 500:
+        return 1.6
+    return 2.0
 
 def rvol_adjustment(rvol):
     rvol = to_number_or_none(rvol)
@@ -2814,6 +2823,11 @@ def trend_persistence_adjustment(row):
             min(MAX_TREND_PERSISTENCE_RANKING_ADJUSTMENT, adjustment),
         ),
         2,
+    )
+
+def normalize_opportunity_score(raw_score):
+    return OPPORTUNITY_SCORE_SCALE * (
+        1 - np.exp(-np.maximum(raw_score, 0) / OPPORTUNITY_SCORE_CURVE_SCALE)
     )
 
 def momentum_exhaustion_penalty(row, intraday=False):
@@ -2990,11 +3004,7 @@ def add_entry_quality_columns(
         + ranked_df["Gap Risk Penalty"]
     )
     ranked_df["Raw Ranking Score"] = raw_opportunity_score.round(3)
-    ranked_df["Ranking Score"] = (
-        (raw_opportunity_score / OPPORTUNITY_SCORE_MAX_RAW)
-        .clip(lower=0, upper=1)
-        * OPPORTUNITY_SCORE_SCALE
-    ).round(1)
+    ranked_df["Ranking Score"] = normalize_opportunity_score(raw_opportunity_score).round(1)
     return ranked_df
 
 def limit_top_picks_by_sector(df, max_per_sector=2, limit=5):
