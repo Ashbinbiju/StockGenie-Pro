@@ -2316,20 +2316,20 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
     success_df["Score"] = pd.to_numeric(success_df["Score"], errors="coerce").fillna(0)
     success_df = success_df[success_df.apply(is_actionable_entry, axis=1)]
     success_df = success_df[success_df["Score"] >= MIN_TOP_PICK_SCORE]
+    ranked_success_df = add_entry_quality_columns(success_df, sector_momentum, nifty_5d_return)
 
     # Sort logic for Top Picks
     recommendation_mode = st.session_state.get('recommendation_mode', 'Standard')
     if recommendation_mode == "Adaptive":
-        top_picks_df = success_df[success_df["Recommendation"].str.contains("Buy", na=False)]
+        top_picks_df = ranked_success_df[ranked_success_df["Recommendation"].str.contains("Buy", na=False)]
     else:
         buy_columns = ["Swing", "Short-Term", "Long-Term", "Breakout", "Ichimoku_Trend"]
-        buy_signal = success_df[buy_columns].apply(
+        buy_signal = ranked_success_df[buy_columns].apply(
             lambda row: row.astype(str).str.contains("Buy", na=False).any(),
             axis=1
         )
-        top_picks_df = success_df[buy_signal]
+        top_picks_df = ranked_success_df[buy_signal]
 
-    top_picks_df = add_entry_quality_columns(top_picks_df, sector_momentum, nifty_5d_return)
     if not top_picks_df.empty:
         top_picks_df = top_picks_df[top_picks_df.apply(is_swing_quality_setup, axis=1)]
     top_picks_df = top_picks_df.sort_values(
@@ -2850,6 +2850,23 @@ def sector_leader_adjustment_columns(ranked_df):
 
     for _, sector_df in ranked_df.groupby("Sector", dropna=False):
         if len(sector_df) < 2:
+            index = sector_df.index[0]
+            row = sector_df.iloc[0]
+            relative_strength = to_number_or_none(row.get("Relative Strength")) or 0.0
+            avg_volume_value = to_number_or_none(row.get("Avg Volume Value")) or 0.0
+            trend_persistence = to_number_or_none(row.get("Trend Persistence")) or 0.0
+            turnover_cr = avg_volume_value / 10_000_000
+            singleton_score = (
+                (1.0 if relative_strength >= 3 else 0.7 if relative_strength >= 1 else 0.5 if relative_strength > 0 else 0.0)
+                + (1.0 if turnover_cr >= 100 else 0.8 if turnover_cr >= 50 else 0.6 if turnover_cr >= 20 else 0.4 if turnover_cr >= 10 else 0.0)
+                + (1.0 if trend_persistence >= 75 else 0.7 if trend_persistence >= 65 else 0.5 if trend_persistence >= 55 else 0.0)
+            ) / 3
+            singleton_adjustment = max(
+                0.0,
+                (singleton_score - 0.5) * 2 * MAX_SECTOR_LEADER_RANKING_ADJUSTMENT,
+            )
+            ranked_df.loc[index, "Sector Leader Score"] = round(singleton_score, 2)
+            ranked_df.loc[index, "Sector Leader Adjustment"] = round(singleton_adjustment, 2)
             continue
 
         metric_ranks = []
