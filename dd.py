@@ -146,6 +146,9 @@ MIN_INTRADAY_LIQUIDITY_VALUE = MIN_INTRADAY_LIQUIDITY_CR * 10_000_000
 MIN_INTRADAY_RS = 1.0
 MIN_INTRADAY_BREAKOUT_RS = 2.5
 MIN_INTRADAY_SECTOR_RELATIVE_STRENGTH = 0.25
+MIN_SWING_LIQUIDITY_CR = 10
+MIN_SWING_LIQUIDITY_VALUE = MIN_SWING_LIQUIDITY_CR * 10_000_000
+MIN_SWING_SECTOR_RELATIVE_STRENGTH = 0.25
 EXHAUSTION_RVOL_THRESHOLD = 5.0
 EXHAUSTION_EMA20_DISTANCE_THRESHOLD = 8.0
 EXHAUSTION_DAILY_MOVE_THRESHOLD = 8.0
@@ -2322,6 +2325,8 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
         top_picks_df = success_df[buy_signal]
 
     top_picks_df = add_entry_quality_columns(top_picks_df, sector_momentum, nifty_5d_return)
+    if not top_picks_df.empty:
+        top_picks_df = top_picks_df[top_picks_df.apply(is_swing_quality_setup, axis=1)]
     top_picks_df = top_picks_df.sort_values(
         by=["Ranking Score", "Reward/Risk", "Score"],
         ascending=[False, False, False]
@@ -2878,6 +2883,13 @@ def is_intraday_quality_setup(row):
     if is_breakout and (relative_strength is None or relative_strength <= MIN_INTRADAY_BREAKOUT_RS):
         return False
     return True
+
+def is_swing_quality_setup(row):
+    avg_volume_value = to_number_or_none(row.get("Avg Volume Value"))
+    sector_perf = to_number_or_none(row.get("Sector Relative Strength %"))
+    weak_liquidity = avg_volume_value is None or avg_volume_value < MIN_SWING_LIQUIDITY_VALUE
+    weak_sector = sector_perf is None or sector_perf < MIN_SWING_SECTOR_RELATIVE_STRENGTH
+    return not (weak_liquidity and weak_sector)
 
 def calculate_entry_metrics(row, max_distance_pct=0.08):
     current_price = to_float_or_none(row.get("Current Price"))
