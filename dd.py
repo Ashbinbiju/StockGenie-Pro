@@ -2401,11 +2401,55 @@ def refresh_setup_expectancy_database():
         ''', rows)
         conn.commit()
         return len(rows)
+    except sqlite3.OperationalError as e:
+        conn.rollback()
+        logging.exception(f"Failed to refresh setup expectancy database: {str(e)}")
+        return 0
     finally:
         conn.close()
 
 def quote_identifier(identifier):
     return '"' + str(identifier).replace('"', '""') + '"'
+
+DAILY_PICK_LIFECYCLE_COLUMNS = {
+    "pick_type": "TEXT",
+    "entry_date": "TEXT",
+    "entry_price": "REAL",
+    "setup_type": "TEXT",
+    "sector_relative_strength": "REAL",
+    "optimal_hold_days": "INTEGER",
+    "expected_hold_days": "INTEGER",
+    "exit_review_day": "TEXT",
+    "exit_status": "TEXT",
+    "exit_reason": "TEXT",
+    "exit_advice_updated_at": "TEXT",
+    "highest_price_after_entry": "REAL",
+    "days_to_peak": "INTEGER",
+    "pnl_day_1": "REAL",
+    "pnl_day_2": "REAL",
+    "pnl_day_3": "REAL",
+    "pnl_day_5": "REAL",
+    "pnl_day_10": "REAL",
+    "pnl_day_20": "REAL",
+    "max_drawdown_after_entry": "REAL",
+    "post_peak_decay_pct": "REAL",
+    "exit_efficiency_score": "REAL",
+    "outcome_updated_at": "TEXT",
+}
+
+def ensure_table_columns(conn, table_name, expected_columns):
+    existing_columns = {
+        row[1] for row in conn.execute(f"PRAGMA table_info({quote_identifier(table_name)})").fetchall()
+    }
+    for column, column_type in expected_columns.items():
+        if column not in existing_columns:
+            conn.execute(
+                f"ALTER TABLE {quote_identifier(table_name)} "
+                f"ADD COLUMN {quote_identifier(column)} {column_type}"
+            )
+
+def ensure_daily_pick_lifecycle_columns(conn):
+    ensure_table_columns(conn, "daily_picks", DAILY_PICK_LIFECYCLE_COLUMNS)
 
 def migrate_daily_picks_primary_key(conn):
     table_info = conn.execute("PRAGMA table_info(daily_picks)").fetchall()
@@ -2760,125 +2804,139 @@ def calculate_exit_advice(
 
 def update_exit_advice(limit=50):
     conn = get_db_connection()
-    history_df = pd.read_sql_query("SELECT * FROM daily_picks WHERE pick_type = 'daily'", conn)
-    learned_lookup = learned_hold_days_lookup(history_df)
-    rows = conn.execute('''
-        SELECT rowid, symbol, entry_date, date, entry_price, buy_at, current_price,
-               setup_type, expected_hold_days, optimal_hold_days, sector_relative_strength
-        FROM daily_picks
-        WHERE pick_type = 'daily'
-        ORDER BY date DESC
-        LIMIT ?
-    ''', (limit,)).fetchall()
+    try:
+        ensure_daily_pick_lifecycle_columns(conn)
+        history_df = pd.read_sql_query("SELECT * FROM daily_picks WHERE pick_type = 'daily'", conn)
+        learned_lookup = learned_hold_days_lookup(history_df)
+        rows = conn.execute('''
+            SELECT rowid, symbol, entry_date, date, entry_price, buy_at, current_price,
+                   setup_type, expected_hold_days, optimal_hold_days, sector_relative_strength
+            FROM daily_picks
+            WHERE pick_type = 'daily'
+            ORDER BY date DESC
+            LIMIT ?
+        ''', (limit,)).fetchall()
 
-    updated = 0
-    for (
-        rowid,
-        symbol,
-        entry_date,
-        pick_date,
-        entry_price,
-        buy_at,
-        current_price,
-        setup_type,
-        expected_hold_days,
-        optimal_hold_days,
-        sector_relative_strength,
-    ) in rows:
-        setup_type = setup_type or "trend_continuation"
-        expected_hold_days = expected_hold_days_for_setup(setup_type, learned_lookup)
-        advice = calculate_exit_advice(
+        updated = 0
+        for (
+            rowid,
             symbol,
-            entry_date or pick_date,
-            entry_price or buy_at or current_price,
+            entry_date,
+            pick_date,
+            entry_price,
+            buy_at,
+            current_price,
             setup_type,
             expected_hold_days,
+            optimal_hold_days,
             sector_relative_strength,
-        )
-        if not advice:
-            continue
-        conn.execute('''
-            UPDATE daily_picks
-            SET expected_hold_days = ?,
-                exit_review_day = ?,
-                exit_status = ?,
-                exit_reason = ?,
-                exit_advice_updated_at = ?
-            WHERE rowid = ?
-        ''', (
-            int(expected_hold_days),
-            exit_review_schedule_text(setup_type, expected_hold_days),
-            advice.get("exit_status"),
-            advice.get("exit_reason"),
-            advice.get("exit_advice_updated_at"),
-            rowid,
-        ))
-        updated += 1
+        ) in rows:
+            setup_type = setup_type or "trend_continuation"
+            expected_hold_days = expected_hold_days_for_setup(setup_type, learned_lookup)
+            advice = calculate_exit_advice(
+                symbol,
+                entry_date or pick_date,
+                entry_price or buy_at or current_price,
+                setup_type,
+                expected_hold_days,
+                sector_relative_strength,
+            )
+            if not advice:
+                continue
+            conn.execute('''
+                UPDATE daily_picks
+                SET expected_hold_days = ?,
+                    exit_review_day = ?,
+                    exit_status = ?,
+                    exit_reason = ?,
+                    exit_advice_updated_at = ?
+                WHERE rowid = ?
+            ''', (
+                int(expected_hold_days),
+                exit_review_schedule_text(setup_type, expected_hold_days),
+                advice.get("exit_status"),
+                advice.get("exit_reason"),
+                advice.get("exit_advice_updated_at"),
+                rowid,
+            ))
+            updated += 1
 
-    conn.commit()
-    conn.close()
-    return updated
+        conn.commit()
+        return updated
+    except sqlite3.OperationalError as e:
+        conn.rollback()
+        logging.exception(f"Failed to update exit advice: {str(e)}")
+        return 0
+    finally:
+        conn.close()
 
 def update_holding_period_outcomes(limit=50):
     conn = get_db_connection()
-    rows = conn.execute('''
-        SELECT rowid, symbol, entry_date, date, entry_price, buy_at, current_price
-        FROM daily_picks
-        WHERE pick_type = 'daily'
-          AND (
-            outcome_updated_at IS NULL
-            OR pnl_day_2 IS NULL
-            OR pnl_day_20 IS NULL
-          )
-        ORDER BY date DESC
-        LIMIT ?
-    ''', (limit,)).fetchall()
+    try:
+        ensure_daily_pick_lifecycle_columns(conn)
+        rows = conn.execute('''
+            SELECT rowid, symbol, entry_date, date, entry_price, buy_at, current_price
+            FROM daily_picks
+            WHERE pick_type = 'daily'
+              AND (
+                outcome_updated_at IS NULL
+                OR pnl_day_2 IS NULL
+                OR pnl_day_20 IS NULL
+              )
+            ORDER BY date DESC
+            LIMIT ?
+        ''', (limit,)).fetchall()
 
-    updated = 0
-    for rowid, symbol, entry_date, pick_date, entry_price, buy_at, current_price in rows:
-        outcome = calculate_holding_period_outcome(
-            symbol,
-            entry_date or pick_date,
-            entry_price or buy_at or current_price,
-        )
-        if not outcome:
-            continue
+        updated = 0
+        for rowid, symbol, entry_date, pick_date, entry_price, buy_at, current_price in rows:
+            outcome = calculate_holding_period_outcome(
+                symbol,
+                entry_date or pick_date,
+                entry_price or buy_at or current_price,
+            )
+            if not outcome:
+                continue
 
-        conn.execute('''
-            UPDATE daily_picks
-            SET highest_price_after_entry = ?,
-                days_to_peak = ?,
-                pnl_day_1 = ?,
-                pnl_day_2 = ?,
-                pnl_day_3 = ?,
-                pnl_day_5 = ?,
-                pnl_day_10 = ?,
-                pnl_day_20 = ?,
-                max_drawdown_after_entry = ?,
-                post_peak_decay_pct = ?,
-                exit_efficiency_score = ?,
-                outcome_updated_at = ?
-            WHERE rowid = ?
-        ''', (
-            db_value(outcome.get("highest_price_after_entry")),
-            db_value(outcome.get("days_to_peak")),
-            db_value(outcome.get("pnl_day_1")),
-            db_value(outcome.get("pnl_day_2")),
-            db_value(outcome.get("pnl_day_3")),
-            db_value(outcome.get("pnl_day_5")),
-            db_value(outcome.get("pnl_day_10")),
-            db_value(outcome.get("pnl_day_20")),
-            db_value(outcome.get("max_drawdown_after_entry")),
-            db_value(outcome.get("post_peak_decay_pct")),
-            db_value(outcome.get("exit_efficiency_score")),
-            outcome.get("outcome_updated_at"),
-            rowid,
-        ))
-        updated += 1
+            conn.execute('''
+                UPDATE daily_picks
+                SET highest_price_after_entry = ?,
+                    days_to_peak = ?,
+                    pnl_day_1 = ?,
+                    pnl_day_2 = ?,
+                    pnl_day_3 = ?,
+                    pnl_day_5 = ?,
+                    pnl_day_10 = ?,
+                    pnl_day_20 = ?,
+                    max_drawdown_after_entry = ?,
+                    post_peak_decay_pct = ?,
+                    exit_efficiency_score = ?,
+                    outcome_updated_at = ?
+                WHERE rowid = ?
+            ''', (
+                db_value(outcome.get("highest_price_after_entry")),
+                db_value(outcome.get("days_to_peak")),
+                db_value(outcome.get("pnl_day_1")),
+                db_value(outcome.get("pnl_day_2")),
+                db_value(outcome.get("pnl_day_3")),
+                db_value(outcome.get("pnl_day_5")),
+                db_value(outcome.get("pnl_day_10")),
+                db_value(outcome.get("pnl_day_20")),
+                db_value(outcome.get("max_drawdown_after_entry")),
+                db_value(outcome.get("post_peak_decay_pct")),
+                db_value(outcome.get("exit_efficiency_score")),
+                outcome.get("outcome_updated_at"),
+                rowid,
+            ))
+            updated += 1
 
-    conn.commit()
-    conn.close()
-    return updated
+        conn.commit()
+        return updated
+    except sqlite3.OperationalError as e:
+        conn.rollback()
+        logging.exception(f"Failed to update holding-period outcomes: {str(e)}")
+        return 0
+    finally:
+        conn.close()
 
 def holding_period_expectancy(history_df):
     pnl_columns = [f"pnl_day_{day}" for day in HOLDING_PERIOD_DAYS]
