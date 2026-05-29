@@ -3649,19 +3649,15 @@ def liquidity_adjustment(avg_volume_value):
     if avg_volume_value is None or avg_volume_value <= 0:
         return 0.0
     turnover_cr = avg_volume_value / 10_000_000
-    if turnover_cr < 10:
-        return 0.0
     if turnover_cr < 20:
-        return 0.3
+        return 0.0
     if turnover_cr < 50:
-        return 0.6
+        return 0.5
     if turnover_cr < 100:
         return 1.0
     if turnover_cr < 250:
-        return 1.3
-    if turnover_cr < 500:
-        return 1.6
-    return 2.0
+        return 1.5
+    return 2.2
 
 def rvol_adjustment(rvol):
     rvol = to_number_or_none(rvol)
