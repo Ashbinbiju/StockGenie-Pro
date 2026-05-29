@@ -15,7 +15,9 @@ import time
 import requests
 import io
 import random
+import shutil
 import spacy
+import tempfile
 from pytrends.request import TrendReq
 import numpy as np
 import itertools
@@ -128,7 +130,21 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Brave/124.0.0.0"
 ]
 
-cache = Cache("stock_data_cache")
+def create_runtime_cache():
+    cache_dir = Path(
+        os.environ.get(
+            "STOCKGENIE_CACHE_DIR",
+            Path(tempfile.gettempdir()) / "stockgenie_stock_data_cache",
+        )
+    )
+    try:
+        return Cache(str(cache_dir))
+    except (sqlite3.DatabaseError, sqlite3.OperationalError) as e:
+        logging.warning(f"Resetting invalid stock data cache at {cache_dir}: {str(e)}")
+        shutil.rmtree(cache_dir, ignore_errors=True)
+        return Cache(str(cache_dir))
+
+cache = create_runtime_cache()
 smartapi_auth_error = None
 smartapi_auth_lock = threading.Lock()
 NIFTY_50_TOKEN = "99926000"
