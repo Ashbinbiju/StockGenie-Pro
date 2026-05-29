@@ -5,6 +5,8 @@ import logging
 import numpy as np
 import streamlit as st
 from datetime import datetime, timedelta
+from pathlib import Path
+from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from tqdm import tqdm
@@ -28,6 +30,20 @@ from dotenv import load_dotenv
 from streamlit import cache_data
 
 load_dotenv()
+APP_TIMEZONE = ZoneInfo("Asia/Kolkata")
+DB_PATH = Path(__file__).resolve().with_name("stock_picks.db")
+
+def app_now():
+    return datetime.now(APP_TIMEZONE)
+
+def app_date_string():
+    return app_now().strftime('%Y-%m-%d')
+
+def app_timestamp_string():
+    return app_now().strftime('%Y-%m-%d %H:%M:%S')
+
+def get_db_connection():
+    return sqlite3.connect(DB_PATH)
 
 def get_config_value_with_source(*names):
     secret_sections = ("angelone", "smartapi", "smart_api", "broker")
@@ -134,6 +150,8 @@ INTRADAY_RANKING_WEIGHTS = {
 OPPORTUNITY_SCORE_SCALE = 100
 OPPORTUNITY_SCORE_CURVE_SCALE = 1.25
 MAX_RANKED_ENTRY_GAP_PERCENT = 3.0
+MIN_SWING_PULLBACK_ENTRY_GAP_PERCENT = 0.5
+MIN_SWING_CONSOLIDATION_CANDLES = 3
 FRESH_BREAKOUT_LOOKBACK = 20
 FRESH_BREAKOUT_MAX_AGE = 3
 FRESH_BREAKOUT_DECAY_BONUSES = {
@@ -169,6 +187,7 @@ HOLDING_PERIOD_DAYS = [1, 2, 3, 5, 10, 20]
 MIN_HOLDING_PERIOD_SAMPLE_SIZE = 3
 MAX_HISTORICAL_EXPECTANCY_RANKING_ADJUSTMENT = 0.6
 MAX_SETUP_EXPECTANCY_RANKING_ADJUSTMENT = 0.5
+PROBABILITY_TARGET_LEVELS = [2, 4, 6]
 DEFAULT_OPTIMAL_HOLD_DAYS_BY_SETUP = {
     "fresh_breakout": 5,
     "sector_leader_continuation": 8,
@@ -2108,6 +2127,13 @@ def setup_holding_metrics(history_df, min_trades=MIN_HOLDING_PERIOD_SAMPLE_SIZE)
             ((five_day_win_rate or 0.0) / 100) * five_day_avg_win
             - five_day_loss_rate * five_day_avg_loss
         ) if len(five_day_returns) >= min_trades else None
+        target_probabilities = {}
+        for target_pct in PROBABILITY_TARGET_LEVELS:
+            target_probabilities[target_pct] = (
+                float((mfe >= target_pct).mean() * 100)
+                if len(mfe) >= min_trades
+                else None
+            )
 
         rows.append({
             "Setup Type": setup_type,
@@ -2128,6 +2154,9 @@ def setup_holding_metrics(history_df, min_trades=MIN_HOLDING_PERIOD_SAMPLE_SIZE)
             "Historical Expectancy %": round(historical_expectancy, 2),
             "Avg Win %": round(avg_win, 2),
             "Avg Loss %": round(avg_loss, 2),
+            "Target +2% Probability %": round(target_probabilities[2], 1) if target_probabilities[2] is not None else None,
+            "Target +4% Probability %": round(target_probabilities[4], 1) if target_probabilities[4] is not None else None,
+            "Target +6% Probability %": round(target_probabilities[6], 1) if target_probabilities[6] is not None else None,
         })
 
     if not rows:
@@ -2146,7 +2175,7 @@ def learned_hold_days_lookup(history_df):
 
 def load_learned_hold_days_lookup():
     try:
-        conn = sqlite3.connect('stock_picks.db')
+        conn = get_db_connection()
         history_df = pd.read_sql_query("SELECT * FROM daily_picks WHERE pick_type = 'daily'", conn)
         conn.close()
         return learned_hold_days_lookup(history_df)
@@ -2174,7 +2203,7 @@ def historical_expectancy_lookup(history_df):
 
 def load_historical_expectancy_lookup():
     try:
-        conn = sqlite3.connect('stock_picks.db')
+        conn = get_db_connection()
         history_df = pd.read_sql_query("SELECT * FROM daily_picks WHERE pick_type = 'daily'", conn)
         conn.close()
         return historical_expectancy_lookup(history_df)
@@ -2215,9 +2244,53 @@ def setup_expectancy_lookup(history_df):
         if pd.notna(row.get("Setup Expectancy %"))
     }
 
+def persisted_setup_expectancy_lookup():
+    conn = get_db_connection()
+    try:
+        rows = conn.execute('''
+            SELECT setup_type, trades, win_rate, avg_return, avg_drawdown,
+                   setup_expectancy, setup_expectancy_bonus, avg_5d_return,
+                   optimal_exit_day, target_2_prob, target_4_prob, target_6_prob
+            FROM setup_expectancy
+        ''').fetchall()
+    finally:
+        conn.close()
+
+    lookup = {}
+    for (
+        setup_type,
+        trades,
+        win_rate,
+        avg_return,
+        avg_drawdown,
+        setup_expectancy,
+        expectancy_bonus,
+        avg_5d_return,
+        optimal_exit_day,
+        target_2_prob,
+        target_4_prob,
+        target_6_prob,
+    ) in rows:
+        lookup[setup_type] = {
+            "setup_expectancy": to_number_or_none(setup_expectancy) or 0.0,
+            "avg_5d_return": to_number_or_none(avg_5d_return) or to_number_or_none(avg_return) or 0.0,
+            "win_rate": to_number_or_none(win_rate) or 0.0,
+            "avg_dd": to_number_or_none(avg_drawdown) or 0.0,
+            "trades": int(trades or 0),
+            "expectancy_bonus": to_number_or_none(expectancy_bonus) or 0.0,
+            "optimal_exit_day": int(optimal_exit_day or 0),
+            "target_2_prob": to_number_or_none(target_2_prob),
+            "target_4_prob": to_number_or_none(target_4_prob),
+            "target_6_prob": to_number_or_none(target_6_prob),
+        }
+    return lookup
+
 def load_setup_expectancy_lookup():
     try:
-        conn = sqlite3.connect('stock_picks.db')
+        persisted_lookup = persisted_setup_expectancy_lookup()
+        if persisted_lookup:
+            return persisted_lookup
+        conn = get_db_connection()
         history_df = pd.read_sql_query("SELECT * FROM daily_picks WHERE pick_type = 'daily'", conn)
         conn.close()
         return setup_expectancy_lookup(history_df)
@@ -2235,18 +2308,140 @@ def setup_expectancy_adjustment(row, setup_expectancy_stats):
 
     expectancy = stats.get("setup_expectancy", 0.0)
     avg_dd = stats.get("avg_dd", 0.0)
-    risk_adjusted_expectancy = expectancy + (avg_dd * 0.20)
-    adjustment = risk_adjusted_expectancy / 10.0
+    if "expectancy_bonus" in stats:
+        return round(
+            max(
+                -MAX_SETUP_EXPECTANCY_RANKING_ADJUSTMENT,
+                min(MAX_SETUP_EXPECTANCY_RANKING_ADJUSTMENT, stats.get("expectancy_bonus", 0.0)),
+            ),
+            2,
+        )
+    return setup_expectancy_bonus(expectancy, avg_dd)
+
+def setup_expectancy_bonus(setup_expectancy, avg_dd):
+    setup_expectancy = to_number_or_none(setup_expectancy) or 0.0
+    avg_dd = to_number_or_none(avg_dd) or 0.0
+    risk_adjusted_expectancy = setup_expectancy + (avg_dd * 0.20)
     return round(
         max(
             -MAX_SETUP_EXPECTANCY_RANKING_ADJUSTMENT,
-            min(MAX_SETUP_EXPECTANCY_RANKING_ADJUSTMENT, adjustment),
+            min(MAX_SETUP_EXPECTANCY_RANKING_ADJUSTMENT, risk_adjusted_expectancy / 10.0),
         ),
         2,
     )
 
+def refresh_setup_expectancy_database():
+    conn = get_db_connection()
+    try:
+        history_df = pd.read_sql_query("SELECT * FROM daily_picks WHERE pick_type = 'daily'", conn)
+        metrics_df = setup_holding_metrics(history_df)
+        if metrics_df.empty:
+            return 0
+
+        updated_at = app_timestamp_string()
+        rows = []
+        for _, row in metrics_df.iterrows():
+            setup_type = row.get("Setup Type")
+            setup_expectancy = to_number_or_none(row.get("Setup Expectancy %"))
+            avg_drawdown = to_number_or_none(row.get("Avg DD %"))
+            if not setup_type or setup_expectancy is None:
+                continue
+            rows.append((
+                setup_type,
+                int(row.get("Trades") or 0),
+                db_value(row.get("5D Win Rate %")),
+                db_value(row.get("Avg 5D Return %")),
+                db_value(row.get("Optimal Exit Day")),
+                db_value(avg_drawdown),
+                db_value(setup_expectancy),
+                setup_expectancy_bonus(setup_expectancy, avg_drawdown),
+                db_value(row.get("Avg 5D Return %")),
+                db_value(row.get("Optimal Exit Day")),
+                db_value(row.get("Avg Peak Day")),
+                db_value(row.get("Early Failure Rate %")),
+                db_value(row.get("Avg MFE %")),
+                db_value(row.get("Avg MAE %")),
+                db_value(row.get("Avg Post-Peak Decay %")),
+                db_value(row.get("Avg Exit Efficiency %")),
+                db_value(row.get("Target +2% Probability %")),
+                db_value(row.get("Target +4% Probability %")),
+                db_value(row.get("Target +6% Probability %")),
+                updated_at,
+            ))
+
+        conn.executemany('''
+            INSERT INTO setup_expectancy (
+                setup_type, trades, win_rate, avg_return, avg_hold_days,
+                avg_drawdown, setup_expectancy, setup_expectancy_bonus,
+                avg_5d_return, optimal_exit_day, avg_peak_day,
+                early_failure_rate, avg_mfe, avg_mae, avg_post_peak_decay,
+                avg_exit_efficiency, target_2_prob, target_4_prob,
+                target_6_prob, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(setup_type) DO UPDATE SET
+                trades = excluded.trades,
+                win_rate = excluded.win_rate,
+                avg_return = excluded.avg_return,
+                avg_hold_days = excluded.avg_hold_days,
+                avg_drawdown = excluded.avg_drawdown,
+                setup_expectancy = excluded.setup_expectancy,
+                setup_expectancy_bonus = excluded.setup_expectancy_bonus,
+                avg_5d_return = excluded.avg_5d_return,
+                optimal_exit_day = excluded.optimal_exit_day,
+                avg_peak_day = excluded.avg_peak_day,
+                early_failure_rate = excluded.early_failure_rate,
+                avg_mfe = excluded.avg_mfe,
+                avg_mae = excluded.avg_mae,
+                avg_post_peak_decay = excluded.avg_post_peak_decay,
+                avg_exit_efficiency = excluded.avg_exit_efficiency,
+                target_2_prob = excluded.target_2_prob,
+                target_4_prob = excluded.target_4_prob,
+                target_6_prob = excluded.target_6_prob,
+                updated_at = excluded.updated_at
+        ''', rows)
+        conn.commit()
+        return len(rows)
+    finally:
+        conn.close()
+
+def quote_identifier(identifier):
+    return '"' + str(identifier).replace('"', '""') + '"'
+
+def migrate_daily_picks_primary_key(conn):
+    table_info = conn.execute("PRAGMA table_info(daily_picks)").fetchall()
+    if not table_info:
+        return
+
+    pk_columns = [
+        row[1]
+        for row in sorted((row for row in table_info if row[5]), key=lambda row: row[5])
+    ]
+    if pk_columns == ["date", "symbol", "pick_type"]:
+        return
+
+    conn.execute("UPDATE daily_picks SET pick_type = 'daily' WHERE pick_type IS NULL OR pick_type = ''")
+    columns = [row[1] for row in table_info]
+    column_defs = [
+        f"{quote_identifier(row[1])} {row[2] or 'TEXT'}"
+        for row in table_info
+    ]
+    column_list = ", ".join(quote_identifier(column) for column in columns)
+    conn.execute("ALTER TABLE daily_picks RENAME TO daily_picks_old")
+    conn.execute(f'''
+        CREATE TABLE daily_picks (
+            {", ".join(column_defs)},
+            PRIMARY KEY (date, symbol, pick_type)
+        )
+    ''')
+    conn.execute(f'''
+        INSERT OR REPLACE INTO daily_picks ({column_list})
+        SELECT {column_list}
+        FROM daily_picks_old
+    ''')
+    conn.execute("DROP TABLE daily_picks_old")
+
 def init_database():
-    conn = sqlite3.connect('stock_picks.db')
+    conn = get_db_connection()
     conn.execute('''
         CREATE TABLE IF NOT EXISTS daily_picks (
             date TEXT,
@@ -2272,6 +2467,41 @@ def init_database():
             PRIMARY KEY (date, symbol)
         )
     ''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS setup_expectancy (
+            setup_type TEXT PRIMARY KEY,
+            trades INTEGER,
+            win_rate REAL,
+            avg_return REAL,
+            avg_hold_days REAL,
+            avg_drawdown REAL,
+            setup_expectancy REAL,
+            setup_expectancy_bonus REAL,
+            avg_5d_return REAL,
+            optimal_exit_day INTEGER,
+            avg_peak_day REAL,
+            early_failure_rate REAL,
+            avg_mfe REAL,
+            avg_mae REAL,
+            avg_post_peak_decay REAL,
+            avg_exit_efficiency REAL,
+            target_2_prob REAL,
+            target_4_prob REAL,
+            target_6_prob REAL,
+            updated_at TEXT
+        )
+    ''')
+    setup_expectancy_columns = {
+        "target_2_prob": "REAL",
+        "target_4_prob": "REAL",
+        "target_6_prob": "REAL",
+    }
+    existing_setup_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(setup_expectancy)").fetchall()
+    }
+    for column, column_type in setup_expectancy_columns.items():
+        if column not in existing_setup_columns:
+            conn.execute(f"ALTER TABLE setup_expectancy ADD COLUMN {column} {column_type}")
     expected_columns = {
         "score": "REAL",
         "current_price": "REAL",
@@ -2329,11 +2559,12 @@ def init_database():
     for column, column_type in expected_columns.items():
         if column not in existing_columns:
             conn.execute(f"ALTER TABLE daily_picks ADD COLUMN {column} {column_type}")
+    migrate_daily_picks_primary_key(conn)
     conn.commit()
     conn.close()
 
 def insert_top_picks(results_df, pick_type="daily"):
-    conn = sqlite3.connect('stock_picks.db')
+    conn = get_db_connection()
     cursor = conn.cursor()
     history_df = pd.read_sql_query("SELECT * FROM daily_picks WHERE pick_type = 'daily'", conn)
     learned_lookup = learned_hold_days_lookup(history_df)
@@ -2344,7 +2575,7 @@ def insert_top_picks(results_df, pick_type="daily"):
         expected_hold_days = expected_hold_days_for_setup(setup_type, learned_lookup)
         exit_review_day = exit_review_schedule_text(setup_type, expected_hold_days)
         data_to_insert.append((
-            datetime.now().strftime('%Y-%m-%d'),
+            app_date_string(),
             row.get('Symbol'),
             db_value(row.get('Score', 0)),
             db_value(row.get('Current Price')),
@@ -2364,7 +2595,7 @@ def insert_top_picks(results_df, pick_type="daily"):
             db_value(row.get('Trailing Stop')),
             row.get('Reason'),
             pick_type,
-            datetime.now().strftime('%Y-%m-%d'),
+            app_date_string(),
             db_value(row.get('Buy At') or row.get('Current Price')),
             setup_type,
             row.get('Sector'),
@@ -2385,7 +2616,7 @@ def insert_top_picks(results_df, pick_type="daily"):
         ))
 
     cursor.executemany('''
-        INSERT OR IGNORE INTO daily_picks (
+        INSERT OR REPLACE INTO daily_picks (
             date, symbol, score, current_price, buy_at, stop_loss, target,
             intraday, swing, short_term, long_term, mean_reversion, breakout,
             ichimoku_trend, recommendation, regime, position_size, trailing_stop,
@@ -2430,7 +2661,7 @@ def calculate_holding_period_outcome(symbol, entry_date, entry_price):
         "days_to_peak": days_to_peak,
         "max_drawdown_after_entry": ((float(lows.min()) - entry_price) / entry_price) * 100,
         "post_peak_decay_pct": latest_gain_pct - peak_gain_pct if latest_gain_pct is not None else None,
-        "outcome_updated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        "outcome_updated_at": app_timestamp_string(),
     }
 
     for hold_days in HOLDING_PERIOD_DAYS:
@@ -2477,7 +2708,7 @@ def calculate_exit_advice(
         return {
             "exit_status": "HOLD",
             "exit_reason": "Entry day; no post-entry candle available yet.",
-            "exit_advice_updated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "exit_advice_updated_at": app_timestamp_string(),
         }
 
     close = pd.to_numeric(data["Close"], errors="coerce")
@@ -2524,11 +2755,11 @@ def calculate_exit_advice(
     return {
         "exit_status": status,
         "exit_reason": " ".join(reasons),
-        "exit_advice_updated_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        "exit_advice_updated_at": app_timestamp_string(),
     }
 
 def update_exit_advice(limit=50):
-    conn = sqlite3.connect('stock_picks.db')
+    conn = get_db_connection()
     history_df = pd.read_sql_query("SELECT * FROM daily_picks WHERE pick_type = 'daily'", conn)
     learned_lookup = learned_hold_days_lookup(history_df)
     rows = conn.execute('''
@@ -2589,7 +2820,7 @@ def update_exit_advice(limit=50):
     return updated
 
 def update_holding_period_outcomes(limit=50):
-    conn = sqlite3.connect('stock_picks.db')
+    conn = get_db_connection()
     rows = conn.execute('''
         SELECT rowid, symbol, entry_date, date, entry_price, buy_at, current_price
         FROM daily_picks
@@ -2681,6 +2912,7 @@ def holding_period_expectancy(history_df):
 def expected_hold_text(row):
     setup_type = row.get("setup_type") or row.get("Setup Type") or classify_setup_type(row)
     learned_lookup = load_learned_hold_days_lookup()
+    setup_expectancy_stats = load_setup_expectancy_lookup()
     expected_hold_days = (
         to_number_or_none(row.get("expected_hold_days"))
         or expected_hold_days_for_setup(setup_type, learned_lookup)
@@ -2697,6 +2929,14 @@ def expected_hold_text(row):
         text += f"  \nExit Status: {exit_status}"
     if exit_reason:
         text += f"  \nExit Reason: {exit_reason}"
+    probabilities = setup_expectancy_stats.get(setup_type, {})
+    probability_parts = []
+    for target_pct in PROBABILITY_TARGET_LEVELS:
+        probability = probabilities.get(f"target_{target_pct}_prob")
+        if probability is not None:
+            probability_parts.append(f"+{target_pct}%: {probability:.0f}%")
+    if probability_parts:
+        text += f"  \nProbability Targets: {' | '.join(probability_parts)}"
     return text
 
 def analyze_batch(stock_batch, patience="high", interval="1d"):
@@ -2759,6 +2999,7 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
         latest_move_pct, ema20_distance_pct = calculate_momentum_extension_metrics(data)
         previous_day_move_pct, overnight_gap_pct = calculate_session_gap_metrics(data)
         fresh_breakout_age = calculate_fresh_breakout_age(data)
+        consolidation_candles = calculate_entry_consolidation_candles(data, fresh_breakout_age)
         rvol, avg_volume_value = calculate_volume_metrics(data)
         logging.info(f"Analyzing {symbol} in {recommendation_mode} mode")
         
@@ -2802,6 +3043,7 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
                 "Overnight Gap %": overnight_gap_pct,
                 "EMA20 Distance %": ema20_distance_pct,
                 "Fresh Breakout Age": fresh_breakout_age,
+                "Consolidation Candles": consolidation_candles,
                 "RVOL": rvol,
                 "Avg Volume Value": avg_volume_value,
                 "Buy At": rec.get("Buy At"),
@@ -2866,6 +3108,7 @@ def analyze_stock_parallel(symbol, patience="high", interval="1d", recommendatio
                 "Overnight Gap %": overnight_gap_pct,
                 "EMA20 Distance %": ema20_distance_pct,
                 "Fresh Breakout Age": fresh_breakout_age,
+                "Consolidation Candles": consolidation_candles,
                 "RVOL": rvol,
                 "Avg Volume Value": avg_volume_value,
                 "Buy At": rec.get("Buy At"),
@@ -2921,7 +3164,7 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
     # Fill missing columns for consistent structure
     expected_cols = [
         "Symbol", "Score", "Current Price", "Recent Return", "Trend Persistence", "Latest Move %",
-        "EMA20 Distance %", "Fresh Breakout Age", "RVOL", "Avg Volume Value",
+        "EMA20 Distance %", "Fresh Breakout Age", "Consolidation Candles", "RVOL", "Avg Volume Value",
         "Buy At", "Stop Loss", "Target", "Recommendation", "Intraday", "Swing", "Short-Term",
         "Long-Term", "Mean_Reversion", "Breakout", "Ichimoku_Trend", "Major Trend Conflict",
         "Status", "Error"
@@ -3043,7 +3286,7 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
     # Ensure all required columns exist to avoid KeyError
     expected_cols = [
         "Symbol", "Score", "Current Price", "Recent Return", "Trend Persistence", "Latest Move %",
-        "Previous Day Move %", "Overnight Gap %", "EMA20 Distance %", "Fresh Breakout Age", "RVOL", "Avg Volume Value",
+        "Previous Day Move %", "Overnight Gap %", "EMA20 Distance %", "Fresh Breakout Age", "Consolidation Candles", "RVOL", "Avg Volume Value",
         "Intraday", "Recommendation", "Buy At", "Stop Loss", "Target",
         "Ichimoku_Trend", "Major Trend Conflict", "Entry Type"
     ]
@@ -3200,6 +3443,38 @@ def calculate_momentum_extension_metrics(data):
             ema20_distance_pct = ((current_close - ema20) / ema20) * 100
 
     return latest_move_pct, ema20_distance_pct
+
+def calculate_consolidation_candles(data, lookback=8, max_range_pct=3.0, end_offset=0):
+    if data.empty or not {"High", "Low", "Close"}.issubset(data.columns):
+        return np.nan
+
+    end_position = len(data) - int(end_offset or 0)
+    if end_position < lookback:
+        return np.nan
+
+    window = data.iloc[:end_position].tail(lookback)
+    highs = pd.to_numeric(window["High"], errors="coerce")
+    lows = pd.to_numeric(window["Low"], errors="coerce")
+    closes = pd.to_numeric(window["Close"], errors="coerce")
+    if highs.isna().any() or lows.isna().any() or closes.isna().any():
+        return np.nan
+
+    count = 0
+    for high, low, close in zip(reversed(highs.tolist()), reversed(lows.tolist()), reversed(closes.tolist())):
+        if close <= 0:
+            break
+        candle_range_pct = ((high - low) / close) * 100
+        if candle_range_pct <= max_range_pct:
+            count += 1
+        else:
+            break
+    return count
+
+def calculate_entry_consolidation_candles(data, breakout_age):
+    breakout_age = to_number_or_none(breakout_age)
+    if breakout_age is not None and 1 <= breakout_age <= FRESH_BREAKOUT_MAX_AGE:
+        return calculate_consolidation_candles(data, end_offset=int(breakout_age))
+    return calculate_consolidation_candles(data)
 
 def calculate_session_gap_metrics(data):
     if data.empty or not {"Open", "Close"}.issubset(data.columns) or len(data) < 2:
@@ -3567,7 +3842,20 @@ def is_swing_quality_setup(row):
     sector_perf = to_number_or_none(row.get("Sector Relative Strength %"))
     weak_liquidity = avg_volume_value is None or avg_volume_value < MIN_SWING_LIQUIDITY_VALUE
     weak_sector = sector_perf is None or sector_perf < MIN_SWING_SECTOR_RELATIVE_STRENGTH
-    return not (weak_liquidity and weak_sector)
+    if weak_liquidity and weak_sector:
+        return False
+
+    entry_gap = to_number_or_none(row.get("Entry Distance %"))
+    consolidation_candles = to_number_or_none(row.get("Consolidation Candles")) or 0
+    has_consolidation = consolidation_candles >= MIN_SWING_CONSOLIDATION_CANDLES
+    if (
+        entry_gap is not None
+        and entry_gap < MIN_SWING_PULLBACK_ENTRY_GAP_PERCENT
+        and not has_consolidation
+    ):
+        return False
+
+    return True
 
 def calculate_entry_metrics(row, max_distance_pct=0.08):
     current_price = to_float_or_none(row.get("Current Price"))
@@ -3623,6 +3911,7 @@ def add_entry_quality_columns(
         ranked_df["Intraday Liquidity Factor"] = 0.0
         ranked_df["Gap Risk Penalty"] = 0.0
         ranked_df["Fresh Breakout Bonus"] = 0.0
+        ranked_df["Consolidation Candles"] = np.nan
         ranked_df["Sector Exhaustion Penalty"] = 0.0
         ranked_df["Trend Persistence Adjustment"] = 0.0
         ranked_df["Sector Leader Score"] = 0.5
@@ -3661,9 +3950,12 @@ def add_entry_quality_columns(
         ranked_df["EMA20 Distance %"] = np.nan
     if "Fresh Breakout Age" not in ranked_df.columns:
         ranked_df["Fresh Breakout Age"] = np.nan
+    if "Consolidation Candles" not in ranked_df.columns:
+        ranked_df["Consolidation Candles"] = np.nan
     ranked_df["Latest Move %"] = pd.to_numeric(ranked_df["Latest Move %"], errors="coerce")
     ranked_df["EMA20 Distance %"] = pd.to_numeric(ranked_df["EMA20 Distance %"], errors="coerce")
     ranked_df["Fresh Breakout Age"] = pd.to_numeric(ranked_df["Fresh Breakout Age"], errors="coerce")
+    ranked_df["Consolidation Candles"] = pd.to_numeric(ranked_df["Consolidation Candles"], errors="coerce")
     ranked_df["Entry Distance Score"] = ranked_df["Entry Distance %"].apply(entry_distance_adjustment)
     ranked_df["Liquidity Score"] = ranked_df["Avg Volume Value"].apply(liquidity_adjustment)
     if intraday:
@@ -3816,6 +4108,12 @@ def ranking_audit_text(row):
             f" | Fresh Breakout: +{format_number(fresh_breakout_bonus_value, 1)} "
             f"({format_number(row.get('Fresh Breakout Age'), 0)} candles)"
         )
+
+    consolidation_text = ""
+    consolidation_candles = to_number_or_none(row.get("Consolidation Candles"))
+    if consolidation_candles is not None and consolidation_candles >= MIN_SWING_CONSOLIDATION_CANDLES:
+        consolidation_text = f" | Consolidation: {format_number(consolidation_candles, 0)} candles"
+
     sector_exhaustion_text = ""
     if sector_exhaustion_penalty_value < 0:
         sector_exhaustion_text = (
@@ -3867,6 +4165,7 @@ def ranking_audit_text(row):
         f"Liquidity: {format_compact_currency(row.get('Avg Volume Value'))} "
         f"({format_number(row.get('Liquidity Score'), 1)})"
         f"{fresh_breakout_text}"
+        f"{consolidation_text}"
         f"{trend_persistence_text}"
         f"{sector_leader_text}"
         f"{historical_expectancy_text}"
@@ -3906,7 +4205,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
         st.session_state.recommendations = recommendations
 
     st.title("📊 StockGenie Pro - NSE Analysis")
-    st.subheader(f"📅 Analysis for {datetime.now().strftime('%d %b %Y')}")
+    st.subheader(f"📅 Analysis for {app_now().strftime('%d %b %Y')}")
 
     # Sector selection
     sector_options = ["All"] + list(SECTORS.keys())
@@ -4023,7 +4322,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                 st.download_button(
                     label="📥 Download Full Strategy Report (CSV)",
                     data=full_report_df.to_csv(index=False).encode('utf-8'),
-                    file_name=f"strategy_report_{datetime.now().strftime('%Y%m%d')}.csv",
+                    file_name=f"strategy_report_{app_now().strftime('%Y%m%d')}.csv",
                     mime="text/csv",
                 )
 
@@ -4107,15 +4406,20 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
         with st.spinner("Updating holding-period outcomes..."):
             updated_outcomes = update_holding_period_outcomes()
             updated_exit_advice = update_exit_advice()
-        conn = sqlite3.connect('stock_picks.db')
+            updated_setup_expectancy = refresh_setup_expectancy_database()
+        conn = get_db_connection()
         history_df = pd.read_sql_query("SELECT * FROM daily_picks ORDER BY date DESC", conn)
+        setup_expectancy_df = pd.read_sql_query("SELECT * FROM setup_expectancy ORDER BY setup_expectancy DESC", conn)
         conn.close()
         if not history_df.empty:
             st.subheader("📜 Historical Top Picks")
+            st.caption(f"Database: {DB_PATH}")
             if updated_outcomes:
                 st.caption(f"Updated holding-period outcomes for {updated_outcomes} picks.")
             if updated_exit_advice:
                 st.caption(f"Updated exit advice for {updated_exit_advice} picks.")
+            if updated_setup_expectancy:
+                st.caption(f"Updated setup expectancy database for {updated_setup_expectancy} setup types.")
             all_dates = sorted(history_df['date'].unique(), reverse=True)
             date_filter = st.selectbox("Filter by Date", ["All"] + all_dates)
             pick_type_filter = st.selectbox("Filter by Pick Type", ["All", "daily", "intraday"])
@@ -4126,8 +4430,11 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                 filtered_df = filtered_df[filtered_df['date'] == date_filter]
             expectancy_df = holding_period_expectancy(history_df[history_df["pick_type"] == "daily"])
             setup_metrics_df = setup_holding_metrics(history_df[history_df["pick_type"] == "daily"])
+            if not setup_expectancy_df.empty:
+                with st.expander("Setup Expectancy Database", expanded=True):
+                    st.dataframe(setup_expectancy_df, use_container_width=True)
             if not setup_metrics_df.empty:
-                with st.expander("Setup Holding Metrics", expanded=True):
+                with st.expander("Setup Holding Metrics", expanded=False):
                     st.dataframe(setup_metrics_df, use_container_width=True)
             if not expectancy_df.empty:
                 with st.expander("Holding Period Expectancy", expanded=False):
