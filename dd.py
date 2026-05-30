@@ -223,6 +223,22 @@ SETUP_TYPE_LABELS = {
     "mean_reversion_bounce": "Mean Reversion Bounce",
     "slow_institutional_trend": "Slow Institutional Trend",
 }
+MARKET_STATS_INDUSTRY_ALIASES = {
+    "Auto": "Automobile and Auto Components",
+    "Bank": "Financial Services",
+    "Cement": "Construction Materials",
+    "Capital Goods": "Capital Goods",
+    "Chemicals": "Chemicals",
+    "FMCG": "Fast Moving Consumer Goods",
+    "Healthcare": "Healthcare",
+    "IT": "Information Technology",
+    "Media": "Media Entertainment & Publication",
+    "Metals": "Metals & Mining",
+    "Oil & Gas": "Oil Gas & Consumable Fuels",
+    "Power": "Power",
+    "Realty": "Realty",
+    "Telecom": "Telecommunication",
+}
 EXIT_STATUS_PRIORITY = {
     "HOLD": 0,
     "TRAIL_SL": 1,
@@ -3390,7 +3406,8 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
         return pd.DataFrame(), results_df
     sector_momentum = calculate_sector_momentum_map(success_df)
     sector_breadth = calculate_sector_breadth_map(success_df)
-    regime_snapshot = market_regime_snapshot(sector_breadth)
+    market_stats = fetch_market_stats()
+    regime_snapshot = market_regime_snapshot(sector_breadth, market_stats=market_stats)
     nifty_5d_return = fetch_nifty_5d_return()
     success_df["Score"] = pd.to_numeric(success_df["Score"], errors="coerce").fillna(0)
     success_df = success_df[success_df.apply(is_actionable_entry, axis=1)]
@@ -3524,7 +3541,8 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
 
     sector_momentum = calculate_sector_momentum_map(results_df)
     sector_breadth = calculate_sector_breadth_map(results_df)
-    regime_snapshot = market_regime_snapshot(sector_breadth)
+    market_stats = fetch_market_stats()
+    regime_snapshot = market_regime_snapshot(sector_breadth, market_stats=market_stats)
     nifty_5d_return = fetch_nifty_intraday_return()
     results_df["Score"] = pd.to_numeric(results_df["Score"], errors="coerce").fillna(0)
     results_df = results_df[results_df.apply(is_actionable_entry, axis=1)]
@@ -3864,6 +3882,59 @@ def calculate_sector_breadth_map(df):
         }
     return breadth
 
+@st.cache_data(ttl=900)
+def fetch_market_stats():
+    try:
+        response = requests.get(
+            "https://brkpoint.in/api/market-stats",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            return {}
+        return payload
+    except Exception as e:
+        logging.warning(f"Failed to fetch market stats breadth: {str(e)}")
+        return {}
+
+def market_stats_breadth_summary(market_stats):
+    breadth = (market_stats or {}).get("breadth") or {}
+    total = int(breadth.get("total") or 0)
+    advancing = int(breadth.get("advancing") or 0)
+    if total <= 0:
+        return {"above": 0, "total": 0, "pct": None, "source": "scan_ema20"}
+    return {
+        "above": advancing,
+        "total": total,
+        "pct": advancing / total * 100,
+        "source": "brkpoint_market_stats",
+    }
+
+def market_stats_industry_lookup(market_stats):
+    industry_rows = (market_stats or {}).get("industry") or []
+    lookup = {}
+    for row in industry_rows:
+        industry = row.get("Industry")
+        if industry:
+            lookup[industry] = row
+    return lookup
+
+def market_stats_for_sector(sector, market_stats):
+    industry_name = MARKET_STATS_INDUSTRY_ALIASES.get(sector, sector)
+    return market_stats_industry_lookup(market_stats).get(industry_name, {})
+
+def market_stats_sector_text(sector, market_stats):
+    stats = market_stats_for_sector(sector, market_stats)
+    total = int(stats.get("total") or 0)
+    advancing = int(stats.get("advancing") or 0)
+    if total <= 0:
+        return None
+    avg_change = to_number_or_none(stats.get("avgChange"))
+    avg_change_text = f", Avg: {avg_change:.2f}%" if avg_change is not None else ""
+    return f"{sector} Advance Breadth: {advancing}/{total}{avg_change_text}"
+
 def sector_breadth_summary(sector_breadth):
     if not sector_breadth:
         return {"above": 0, "total": 0, "pct": None}
@@ -3907,8 +3978,12 @@ def market_regime_from_inputs(nifty_snapshot, breadth_summary):
         return "Weak"
     return "Neutral"
 
-def market_regime_snapshot(sector_breadth):
-    breadth = sector_breadth_summary(sector_breadth)
+def market_regime_snapshot(sector_breadth, market_stats=None):
+    market_stats = market_stats if market_stats is not None else fetch_market_stats()
+    breadth = market_stats_breadth_summary(market_stats)
+    if breadth.get("pct") is None:
+        breadth = sector_breadth_summary(sector_breadth)
+        breadth["source"] = "scan_ema20"
     nifty_snapshot = fetch_nifty_regime_snapshot()
     return {
         **nifty_snapshot,
@@ -3916,6 +3991,8 @@ def market_regime_snapshot(sector_breadth):
         "market_breadth_above_ema20": breadth.get("above"),
         "market_breadth_total": breadth.get("total"),
         "market_breadth_pct": breadth.get("pct"),
+        "market_breadth_source": breadth.get("source"),
+        "market_stats": market_stats,
     }
 
 def market_regime_score_multiplier(market_regime):
@@ -4264,6 +4341,8 @@ def add_entry_quality_columns(
         ranked_df["Sector Breadth Text"] = None
         ranked_df["Market Regime"] = market_regime.get("market_regime", "Unknown")
         ranked_df["Market Breadth %"] = market_regime.get("market_breadth_pct")
+        ranked_df["Market Breadth Source"] = market_regime.get("market_breadth_source")
+        ranked_df["Industry Breadth Text"] = None
         ranked_df["Market Regime Multiplier"] = market_regime_score_multiplier(
             market_regime.get("market_regime", "Unknown")
         )
@@ -4315,6 +4394,10 @@ def add_entry_quality_columns(
     ranked_df["Market Breadth Above EMA20"] = market_regime.get("market_breadth_above_ema20")
     ranked_df["Market Breadth Total"] = market_regime.get("market_breadth_total")
     ranked_df["Market Breadth %"] = market_regime.get("market_breadth_pct")
+    ranked_df["Market Breadth Source"] = market_regime.get("market_breadth_source")
+    ranked_df["Industry Breadth Text"] = ranked_df["Sector"].map(
+        lambda sector: market_stats_sector_text(sector, market_regime.get("market_stats"))
+    )
     ranked_df["Nifty Above EMA20"] = market_regime.get("nifty_above_ema20")
     ranked_df["Nifty Above EMA50"] = market_regime.get("nifty_above_ema50")
     ranked_df["Market Regime Multiplier"] = market_regime_score_multiplier(
@@ -4502,6 +4585,7 @@ def ranking_audit_text(row):
     market_regime = row.get("Market Regime") or "Unknown"
     market_multiplier = to_number_or_none(row.get("Market Regime Multiplier")) or 1.0
     market_breadth_pct = to_number_or_none(row.get("Market Breadth %"))
+    market_breadth_source = row.get("Market Breadth Source")
     nifty_above_ema20 = row.get("Nifty Above EMA20")
     nifty_above_ema50 = row.get("Nifty Above EMA50")
     exhaustion_penalty = to_number_or_none(row.get("Exhaustion Penalty")) or 0.0
@@ -4586,8 +4670,16 @@ def ranking_audit_text(row):
         f"Nifty Above EMA20: {format_yes_no(nifty_above_ema20)}  \n"
         f"Nifty Above EMA50: {format_yes_no(nifty_above_ema50)}"
     )
+    if market_breadth_source == "brkpoint_market_stats":
+        market_regime_text += "  \nBreadth Source: Market Stats"
     if market_multiplier < 1:
         market_regime_text += f"  \nRegime Score Multiplier: {market_multiplier:.2f}"
+
+    industry_breadth_text = row.get("Industry Breadth Text")
+    if industry_breadth_text:
+        industry_breadth_text = f" | {industry_breadth_text} "
+    else:
+        industry_breadth_text = ""
 
     return (
         f"Grade: {grade}  \n"
@@ -4601,6 +4693,7 @@ def ranking_audit_text(row):
         f"{format_percent(row.get('Sector Performance %'))} "
         f"(Rel: {format_percent(row.get('Sector Relative Strength %'))}) "
         f" | {row.get('Sector Breadth Text') or sector_breadth_text(row)} "
+        f"{industry_breadth_text}"
         f"({format_number(row.get('Sector Momentum Score'), 1)}) | "
         f"RR: {format_number(row.get('Reward/Risk'))} | "
         f"Entry Gap: {format_percent(row.get('Entry Distance %'))} "
