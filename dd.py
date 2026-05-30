@@ -4016,6 +4016,33 @@ def normalize_opportunity_score(raw_score):
         1 - np.exp(-np.maximum(raw_score, 0) / OPPORTUNITY_SCORE_CURVE_SCALE)
     )
 
+def absolute_sector_leader_score(row):
+    relative_strength = to_number_or_none(row.get("Relative Strength")) or 0.0
+    avg_volume_value = to_number_or_none(row.get("Avg Volume Value")) or 0.0
+    trend_persistence = to_number_or_none(row.get("Trend Persistence")) or 0.0
+    turnover_cr = avg_volume_value / 10_000_000
+    rs_score = (
+        1.0 if relative_strength >= 6
+        else 0.9 if relative_strength >= 3
+        else 0.7 if relative_strength >= 1
+        else 0.5 if relative_strength > 0
+        else 0.0
+    )
+    liquidity_score = (
+        1.0 if turnover_cr >= 100
+        else 0.8 if turnover_cr >= 50
+        else 0.6 if turnover_cr >= 20
+        else 0.4 if turnover_cr >= 10
+        else 0.0
+    )
+    persistence_score = (
+        1.0 if trend_persistence >= 75
+        else 0.7 if trend_persistence >= 60
+        else 0.5 if trend_persistence >= 50
+        else 0.0
+    )
+    return (rs_score + liquidity_score + persistence_score) / 3
+
 def sector_leader_adjustment_columns(ranked_df):
     ranked_df["Sector Leader Score"] = 0.5
     ranked_df["Sector Leader Adjustment"] = 0.0
@@ -4036,15 +4063,7 @@ def sector_leader_adjustment_columns(ranked_df):
         if len(sector_df) < 2:
             index = sector_df.index[0]
             row = sector_df.iloc[0]
-            relative_strength = to_number_or_none(row.get("Relative Strength")) or 0.0
-            avg_volume_value = to_number_or_none(row.get("Avg Volume Value")) or 0.0
-            trend_persistence = to_number_or_none(row.get("Trend Persistence")) or 0.0
-            turnover_cr = avg_volume_value / 10_000_000
-            singleton_score = (
-                (1.0 if relative_strength >= 3 else 0.7 if relative_strength >= 1 else 0.5 if relative_strength > 0 else 0.0)
-                + (1.0 if turnover_cr >= 100 else 0.8 if turnover_cr >= 50 else 0.6 if turnover_cr >= 20 else 0.4 if turnover_cr >= 10 else 0.0)
-                + (1.0 if trend_persistence >= 75 else 0.7 if trend_persistence >= 65 else 0.5 if trend_persistence >= 55 else 0.0)
-            ) / 3
+            singleton_score = absolute_sector_leader_score(row)
             singleton_adjustment = max(
                 0.0,
                 (singleton_score - 0.5) * 2 * MAX_SECTOR_LEADER_RANKING_ADJUSTMENT,
@@ -4064,7 +4083,14 @@ def sector_leader_adjustment_columns(ranked_df):
             zero_to_one_rank = (values.rank(method="average") - 1) / (len(values) - 1)
             metric_ranks.append(zero_to_one_rank)
 
-        leader_score = sum(metric_ranks) / len(metric_ranks)
+        relative_leader_score = sum(metric_ranks) / len(metric_ranks)
+        absolute_leader_score = sector_df.apply(absolute_sector_leader_score, axis=1)
+        leader_score = relative_leader_score
+        if len(sector_df) <= 5:
+            leader_score = pd.concat(
+                [relative_leader_score, absolute_leader_score],
+                axis=1,
+            ).max(axis=1)
         leader_adjustment = (
             (leader_score - 0.5)
             * 2
@@ -4430,11 +4456,25 @@ def format_compact_currency(value):
         return f"₹{value / 100_000:.2f}L"
     return f"₹{value:.0f}"
 
+def format_yes_no(value):
+    if value is None:
+        return "N/A"
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"true", "yes", "1"}:
+            return "Yes"
+        if text in {"false", "no", "0"}:
+            return "No"
+        return "N/A"
+    return "Yes" if bool(value) else "No"
+
 def ranking_audit_text(row):
     grade = row.get("Confidence Grade") or confidence_grade(row)
     market_regime = row.get("Market Regime") or "Unknown"
     market_multiplier = to_number_or_none(row.get("Market Regime Multiplier")) or 1.0
     market_breadth_pct = to_number_or_none(row.get("Market Breadth %"))
+    nifty_above_ema20 = row.get("Nifty Above EMA20")
+    nifty_above_ema50 = row.get("Nifty Above EMA50")
     exhaustion_penalty = to_number_or_none(row.get("Exhaustion Penalty")) or 0.0
     gap_risk_penalty = to_number_or_none(row.get("Gap Risk Penalty")) or 0.0
     fresh_breakout_bonus_value = to_number_or_none(row.get("Fresh Breakout Bonus")) or 0.0
@@ -4511,15 +4551,18 @@ def ranking_audit_text(row):
             f"({row.get('Setup Type') or 'setup'})"
         )
 
-    market_regime_text = f"Market Regime: {market_regime}"
-    if market_breadth_pct is not None:
-        market_regime_text += f" (Breadth: {market_breadth_pct:.0f}%)"
+    market_regime_text = (
+        f"Market Regime: {market_regime}  \n"
+        f"Breadth: {format_percent(market_breadth_pct, 0)}  \n"
+        f"Nifty Above EMA20: {format_yes_no(nifty_above_ema20)}  \n"
+        f"Nifty Above EMA50: {format_yes_no(nifty_above_ema50)}"
+    )
     if market_multiplier < 1:
-        market_regime_text += f" | Regime Score Multiplier: {market_multiplier:.2f}"
+        market_regime_text += f"  \nRegime Score Multiplier: {market_multiplier:.2f}"
 
     return (
-        f"Grade: {grade} | "
-        f"{market_regime_text} | "
+        f"Grade: {grade}  \n"
+        f"{market_regime_text}  \n"
         f"Opportunity Score: {format_number(row.get('Ranking Score'))} | "
         f"RS: {format_percent(row.get('Relative Strength'))} "
         f"({format_number(row.get('Relative Strength Score'), 1)}) | "
