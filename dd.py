@@ -203,6 +203,9 @@ HOLDING_PERIOD_DAYS = [1, 2, 3, 5, 10, 20]
 MIN_HOLDING_PERIOD_SAMPLE_SIZE = 3
 MAX_HISTORICAL_EXPECTANCY_RANKING_ADJUSTMENT = 0.6
 MAX_SETUP_EXPECTANCY_RANKING_ADJUSTMENT = 0.5
+WEAK_MARKET_REGIME_SCORE_MULTIPLIER = 0.90
+MARKET_REGIME_BULL_BREADTH_THRESHOLD = 60.0
+MARKET_REGIME_WEAK_BREADTH_THRESHOLD = 50.0
 PROBABILITY_TARGET_LEVELS = [2, 4, 6]
 DEFAULT_OPTIMAL_HOLD_DAYS_BY_SETUP = {
     "fresh_breakout": 5,
@@ -211,6 +214,14 @@ DEFAULT_OPTIMAL_HOLD_DAYS_BY_SETUP = {
     "high_rvol_explosive": 2,
     "slow_institutional_trend": 15,
     "trend_continuation": 8,
+}
+SETUP_TYPE_LABELS = {
+    "fresh_breakout": "Fresh Breakout",
+    "sector_leader_continuation": "Sector Leader",
+    "high_rvol_explosive": "High RVOL",
+    "trend_continuation": "Trend Continuation",
+    "mean_reversion_bounce": "Mean Reversion Bounce",
+    "slow_institutional_trend": "Slow Institutional Trend",
 }
 EXIT_STATUS_PRIORITY = {
     "HOLD": 0,
@@ -712,6 +723,52 @@ def fetch_nifty_5d_return():
 
 def fetch_nifty_intraday_return():
     return fetch_nifty_recent_return(interval="FIFTEEN_MINUTE", lookback_days=5, candles=5)
+
+@st.cache_data(ttl=1800)
+def fetch_nifty_regime_snapshot():
+    try:
+        auth_error = get_smartapi_auth_error()
+        if auth_error:
+            logging.warning(f"Skipping NIFTY regime request: {auth_error}")
+            return {}
+
+        smart_api = get_smartapi_session(API_KEYS["Historical"], CLIENT_ID, PASSWORD, TOTP_SECRET)
+        if not smart_api:
+            return {}
+
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=120)
+        enforce_rate_limit()
+        historical_data = smart_api.getCandleData({
+            "exchange": "NSE",
+            "symboltoken": NIFTY_50_TOKEN,
+            "interval": "ONE_DAY",
+            "fromdate": start_date.strftime("%Y-%m-%d %H:%M"),
+            "todate": end_date.strftime("%Y-%m-%d %H:%M")
+        })
+
+        if not historical_data or not isinstance(historical_data, dict) or not historical_data.get("data"):
+            return {}
+
+        data = pd.DataFrame(historical_data["data"], columns=["Date", "Open", "High", "Low", "Close", "Volume"])
+        data["Close"] = pd.to_numeric(data["Close"], errors="coerce")
+        data = data.dropna(subset=["Close"])
+        if len(data) < 50:
+            return {}
+
+        close = float(data["Close"].iloc[-1])
+        ema20 = float(data["Close"].ewm(span=20, adjust=False).mean().iloc[-1])
+        ema50 = float(data["Close"].ewm(span=50, adjust=False).mean().iloc[-1])
+        return {
+            "nifty_close": close,
+            "nifty_ema20": ema20,
+            "nifty_ema50": ema50,
+            "nifty_above_ema20": close > ema20,
+            "nifty_above_ema50": close > ema50,
+        }
+    except Exception as e:
+        logging.warning(f"Failed to compute NIFTY market regime: {str(e)}")
+        return {}
 
 def calculate_advance_decline_ratio(stock_list):
     advances = 0
@@ -2153,7 +2210,10 @@ def setup_holding_metrics(history_df, min_trades=MIN_HOLDING_PERIOD_SAMPLE_SIZE)
 
         rows.append({
             "Setup Type": setup_type,
-            "Trades": int(max(trades_by_day.values())),
+            "Trades": int(len(optimal_returns)),
+            "Win Rate %": round(win_rate * 100, 1),
+            "Avg Return %": round(float(optimal_returns.mean()), 2),
+            "Median Return %": round(float(optimal_returns.median()), 2),
             "Avg 5D Return %": round(float(five_day_returns.mean()), 2) if not five_day_returns.empty else None,
             "5D Win Rate %": round(five_day_win_rate, 1) if five_day_win_rate is not None else None,
             "Avg DD %": round(float(mae.mean()), 2) if not mae.empty else None,
@@ -2178,6 +2238,30 @@ def setup_holding_metrics(history_df, min_trades=MIN_HOLDING_PERIOD_SAMPLE_SIZE)
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows).sort_values("Optimal Expectancy %", ascending=False)
+
+def setup_type_win_rate_table(history_df):
+    metrics_df = setup_holding_metrics(history_df)
+    if metrics_df.empty:
+        return pd.DataFrame()
+
+    metrics_df["Confidence"] = metrics_df["Win Rate %"].apply(setup_confidence_grade)
+    display_columns = ["Setup Type", "Trades", "Win Rate %", "Confidence", "Avg Return %", "Median Return %"]
+    table_df = metrics_df[[col for col in display_columns if col in metrics_df.columns]].copy()
+    if "Setup Type" in table_df.columns:
+        table_df["Setup Type"] = table_df["Setup Type"].apply(setup_type_display_name)
+    return table_df.sort_values(["Win Rate %", "Trades"], ascending=[False, False])
+
+def setup_confidence_grade(win_rate):
+    win_rate = to_number_or_none(win_rate)
+    if win_rate is None:
+        return "N/A"
+    if win_rate > 70:
+        return "A+"
+    if win_rate >= 60:
+        return "A"
+    if win_rate >= 50:
+        return "B"
+    return "C"
 
 def learned_hold_days_lookup(history_df):
     metrics_df = setup_holding_metrics(history_df)
@@ -2251,8 +2335,10 @@ def setup_expectancy_lookup(history_df):
     return {
         row["Setup Type"]: {
             "setup_expectancy": to_number_or_none(row.get("Setup Expectancy %")) or 0.0,
+            "avg_return": to_number_or_none(row.get("Avg Return %")) or 0.0,
             "avg_5d_return": to_number_or_none(row.get("Avg 5D Return %")) or 0.0,
-            "win_rate": to_number_or_none(row.get("5D Win Rate %")) or 0.0,
+            "median_return": to_number_or_none(row.get("Median Return %")) or 0.0,
+            "win_rate": to_number_or_none(row.get("Win Rate %")) or 0.0,
             "avg_dd": to_number_or_none(row.get("Avg DD %")) or 0.0,
             "trades": int(row.get("Trades") or 0),
         }
@@ -2266,7 +2352,8 @@ def persisted_setup_expectancy_lookup():
         rows = conn.execute('''
             SELECT setup_type, trades, win_rate, avg_return, avg_drawdown,
                    setup_expectancy, setup_expectancy_bonus, avg_5d_return,
-                   optimal_exit_day, target_2_prob, target_4_prob, target_6_prob
+                   optimal_exit_day, target_2_prob, target_4_prob, target_6_prob,
+                   median_return
             FROM setup_expectancy
         ''').fetchall()
     finally:
@@ -2286,10 +2373,13 @@ def persisted_setup_expectancy_lookup():
         target_2_prob,
         target_4_prob,
         target_6_prob,
+        median_return,
     ) in rows:
         lookup[setup_type] = {
             "setup_expectancy": to_number_or_none(setup_expectancy) or 0.0,
             "avg_5d_return": to_number_or_none(avg_5d_return) or to_number_or_none(avg_return) or 0.0,
+            "avg_return": to_number_or_none(avg_return) or 0.0,
+            "median_return": to_number_or_none(median_return) or 0.0,
             "win_rate": to_number_or_none(win_rate) or 0.0,
             "avg_dd": to_number_or_none(avg_drawdown) or 0.0,
             "trades": int(trades or 0),
@@ -2365,8 +2455,8 @@ def refresh_setup_expectancy_database():
             rows.append((
                 setup_type,
                 int(row.get("Trades") or 0),
-                db_value(row.get("5D Win Rate %")),
-                db_value(row.get("Avg 5D Return %")),
+                db_value(row.get("Win Rate %")),
+                db_value(row.get("Avg Return %")),
                 db_value(row.get("Optimal Exit Day")),
                 db_value(avg_drawdown),
                 db_value(setup_expectancy),
@@ -2382,6 +2472,7 @@ def refresh_setup_expectancy_database():
                 db_value(row.get("Target +2% Probability %")),
                 db_value(row.get("Target +4% Probability %")),
                 db_value(row.get("Target +6% Probability %")),
+                db_value(row.get("Median Return %")),
                 updated_at,
             ))
 
@@ -2392,8 +2483,8 @@ def refresh_setup_expectancy_database():
                 avg_5d_return, optimal_exit_day, avg_peak_day,
                 early_failure_rate, avg_mfe, avg_mae, avg_post_peak_decay,
                 avg_exit_efficiency, target_2_prob, target_4_prob,
-                target_6_prob, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                target_6_prob, median_return, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(setup_type) DO UPDATE SET
                 trades = excluded.trades,
                 win_rate = excluded.win_rate,
@@ -2413,6 +2504,7 @@ def refresh_setup_expectancy_database():
                 target_2_prob = excluded.target_2_prob,
                 target_4_prob = excluded.target_4_prob,
                 target_6_prob = excluded.target_6_prob,
+                median_return = excluded.median_return,
                 updated_at = excluded.updated_at
         ''', rows)
         conn.commit()
@@ -2535,6 +2627,7 @@ def init_database():
             avg_return REAL,
             avg_hold_days REAL,
             avg_drawdown REAL,
+            median_return REAL,
             setup_expectancy REAL,
             setup_expectancy_bonus REAL,
             avg_5d_return REAL,
@@ -2555,6 +2648,7 @@ def init_database():
         "target_2_prob": "REAL",
         "target_4_prob": "REAL",
         "target_6_prob": "REAL",
+        "median_return": "REAL",
     }
     existing_setup_columns = {
         row[1] for row in conn.execute("PRAGMA table_info(setup_expectancy)").fetchall()
@@ -2994,8 +3088,15 @@ def expected_hold_text(row):
     exit_review_day = row.get("exit_review_day") or exit_review_schedule_text(setup_type, expected_hold_days)
     exit_status = row.get("exit_status") or "HOLD"
     exit_reason = row.get("exit_reason")
+    similar_setup_stats = setup_expectancy_stats.get(setup_type, {})
+    setup_sample_count = int(similar_setup_stats.get("trades") or 0)
+    has_setup_history = setup_sample_count >= MIN_HOLDING_PERIOD_SAMPLE_SIZE
+    historical_win_rate = similar_setup_stats.get("win_rate") if has_setup_history else None
+    setup_confidence = setup_confidence_grade(historical_win_rate)
     text = (
         f"Setup Type: {setup_type}  \n"
+        f"Historical Win Rate: {format_percent(historical_win_rate, 0)}  \n"
+        f"Confidence: {setup_confidence}  \n"
         f"Expected Hold: {int(expected_hold_days)} trading days  \n"
         f"Exit Review: {exit_review_day}"
     )
@@ -3003,14 +3104,21 @@ def expected_hold_text(row):
         text += f"  \nExit Status: {exit_status}"
     if exit_reason:
         text += f"  \nExit Reason: {exit_reason}"
-    probabilities = setup_expectancy_stats.get(setup_type, {})
+    if has_setup_history:
+        text += (
+            f"  \nSamples: {setup_sample_count}  \n"
+            f"Avg Return: {format_percent(similar_setup_stats.get('avg_return'), 1)}"
+        )
+    probabilities = similar_setup_stats
     probability_parts = []
     for target_pct in PROBABILITY_TARGET_LEVELS:
         probability = probabilities.get(f"target_{target_pct}_prob")
         if probability is not None:
-            probability_parts.append(f"+{target_pct}%: {probability:.0f}%")
+            probability_parts.append(f"+{target_pct}% : {probability:.0f}%")
     if probability_parts:
-        text += f"  \nProbability Targets: {' | '.join(probability_parts)}"
+        text += "  \nHistorical Similar Setups"
+        for probability_part in probability_parts:
+            text += f"  \n{probability_part}"
     return text
 
 def analyze_batch(stock_batch, patience="high", interval="1d"):
@@ -3249,12 +3357,26 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
 
     # Filter for Top Picks (Success only)
     success_df = results_df[results_df["Status"] == "Success"].copy()
+    if success_df.empty:
+        return pd.DataFrame(), results_df
     sector_momentum = calculate_sector_momentum_map(success_df)
+    sector_breadth = calculate_sector_breadth_map(success_df)
+    regime_snapshot = market_regime_snapshot(sector_breadth)
     nifty_5d_return = fetch_nifty_5d_return()
     success_df["Score"] = pd.to_numeric(success_df["Score"], errors="coerce").fillna(0)
     success_df = success_df[success_df.apply(is_actionable_entry, axis=1)]
+    if success_df.empty:
+        return pd.DataFrame(), results_df
     success_df = success_df[success_df["Score"] >= MIN_TOP_PICK_SCORE]
-    ranked_success_df = add_entry_quality_columns(success_df, sector_momentum, nifty_5d_return)
+    if success_df.empty:
+        return pd.DataFrame(), results_df
+    ranked_success_df = add_entry_quality_columns(
+        success_df,
+        sector_momentum,
+        nifty_5d_return,
+        sector_breadth=sector_breadth,
+        market_regime=regime_snapshot,
+    )
 
     # Sort logic for Top Picks
     recommendation_mode = st.session_state.get('recommendation_mode', 'Standard')
@@ -3372,10 +3494,16 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
         results_df["Score"] = 0
 
     sector_momentum = calculate_sector_momentum_map(results_df)
+    sector_breadth = calculate_sector_breadth_map(results_df)
+    regime_snapshot = market_regime_snapshot(sector_breadth)
     nifty_5d_return = fetch_nifty_intraday_return()
     results_df["Score"] = pd.to_numeric(results_df["Score"], errors="coerce").fillna(0)
     results_df = results_df[results_df.apply(is_actionable_entry, axis=1)]
+    if results_df.empty:
+        return pd.DataFrame()
     results_df = results_df[results_df["Score"] >= MIN_TOP_PICK_SCORE]
+    if results_df.empty:
+        return pd.DataFrame()
         
     recommendation_mode = st.session_state.get('recommendation_mode', 'Standard')
     if recommendation_mode == "Adaptive":
@@ -3386,6 +3514,8 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
         results_df,
         sector_momentum,
         nifty_5d_return,
+        sector_breadth=sector_breadth,
+        market_regime=regime_snapshot,
         ranking_weights=INTRADAY_RANKING_WEIGHTS,
         intraday=True,
     )
@@ -3680,6 +3810,88 @@ def calculate_sector_momentum_map(df):
         return {}
     return momentum_df.groupby("Sector")["Recent Return"].mean().to_dict()
 
+def calculate_sector_breadth_map(df):
+    if df.empty or "EMA20 Distance %" not in df.columns:
+        return {}
+    breadth_df = df.copy()
+    if "Sector" not in breadth_df.columns:
+        breadth_df["Sector"] = breadth_df["Symbol"].apply(get_stock_sector)
+    breadth_df["EMA20 Distance %"] = pd.to_numeric(
+        breadth_df["EMA20 Distance %"],
+        errors="coerce",
+    )
+    breadth_df = breadth_df.dropna(subset=["EMA20 Distance %"])
+    if breadth_df.empty:
+        return {}
+
+    breadth = {}
+    for sector, sector_df in breadth_df.groupby("Sector", dropna=False):
+        total = len(sector_df)
+        above_ema20 = int((sector_df["EMA20 Distance %"] > 0).sum())
+        breadth[sector] = {
+            "above": above_ema20,
+            "total": int(total),
+            "pct": (above_ema20 / total * 100) if total else None,
+        }
+    return breadth
+
+def sector_breadth_summary(sector_breadth):
+    if not sector_breadth:
+        return {"above": 0, "total": 0, "pct": None}
+    total = sum(int(stats.get("total") or 0) for stats in sector_breadth.values())
+    above = sum(int(stats.get("above") or 0) for stats in sector_breadth.values())
+    return {
+        "above": above,
+        "total": total,
+        "pct": (above / total * 100) if total else None,
+    }
+
+def sector_breadth_text(row):
+    above = to_number_or_none(row.get("Sector Breadth Above EMA20"))
+    total = to_number_or_none(row.get("Sector Breadth Total"))
+    if above is None or total is None or total <= 0:
+        return "N/A"
+    sector = row.get("Sector") or "Sector"
+    return f"{sector} Breadth: {int(above)}/{int(total)} stocks above EMA20"
+
+def market_regime_from_inputs(nifty_snapshot, breadth_summary):
+    nifty_snapshot = nifty_snapshot or {}
+    breadth_summary = breadth_summary or {}
+    above_ema20 = bool(nifty_snapshot.get("nifty_above_ema20"))
+    above_ema50 = bool(nifty_snapshot.get("nifty_above_ema50"))
+    breadth_pct = to_number_or_none(breadth_summary.get("pct"))
+
+    if not nifty_snapshot:
+        if breadth_pct is not None and breadth_pct < MARKET_REGIME_WEAK_BREADTH_THRESHOLD:
+            return "Weak"
+        return "Unknown"
+    if (
+        above_ema20
+        and above_ema50
+        and (breadth_pct is None or breadth_pct >= MARKET_REGIME_BULL_BREADTH_THRESHOLD)
+    ):
+        return "Bull"
+    if (
+        (not above_ema20 and not above_ema50)
+        or (breadth_pct is not None and breadth_pct < MARKET_REGIME_WEAK_BREADTH_THRESHOLD)
+    ):
+        return "Weak"
+    return "Neutral"
+
+def market_regime_snapshot(sector_breadth):
+    breadth = sector_breadth_summary(sector_breadth)
+    nifty_snapshot = fetch_nifty_regime_snapshot()
+    return {
+        **nifty_snapshot,
+        "market_regime": market_regime_from_inputs(nifty_snapshot, breadth),
+        "market_breadth_above_ema20": breadth.get("above"),
+        "market_breadth_total": breadth.get("total"),
+        "market_breadth_pct": breadth.get("pct"),
+    }
+
+def market_regime_score_multiplier(market_regime):
+    return WEAK_MARKET_REGIME_SCORE_MULTIPLIER if market_regime == "Weak" else 1.0
+
 def sector_momentum_adjustment(sector_perf):
     sector_perf = to_number_or_none(sector_perf)
     if sector_perf is None:
@@ -3813,6 +4025,12 @@ def sector_leader_adjustment_columns(ranked_df):
     metrics = ["Relative Strength", "Avg Volume Value", "Trend Persistence"]
     for metric in metrics:
         ranked_df[metric] = pd.to_numeric(ranked_df[metric], errors="coerce")
+    if "Sector Relative Strength %" not in ranked_df.columns:
+        ranked_df["Sector Relative Strength %"] = 0.0
+    ranked_df["Sector Relative Strength %"] = pd.to_numeric(
+        ranked_df["Sector Relative Strength %"],
+        errors="coerce",
+    ).fillna(0.0)
 
     for _, sector_df in ranked_df.groupby("Sector", dropna=False):
         if len(sector_df) < 2:
@@ -3831,6 +4049,8 @@ def sector_leader_adjustment_columns(ranked_df):
                 0.0,
                 (singleton_score - 0.5) * 2 * MAX_SECTOR_LEADER_RANKING_ADJUSTMENT,
             )
+            if (to_number_or_none(row.get("Sector Relative Strength %")) or 0.0) < 0:
+                singleton_adjustment *= 0.5
             ranked_df.loc[index, "Sector Leader Score"] = round(singleton_score, 2)
             ranked_df.loc[index, "Sector Leader Adjustment"] = round(singleton_adjustment, 2)
             continue
@@ -3852,6 +4072,14 @@ def sector_leader_adjustment_columns(ranked_df):
         ).clip(
             lower=-MAX_SECTOR_LEADER_RANKING_ADJUSTMENT,
             upper=MAX_SECTOR_LEADER_RANKING_ADJUSTMENT,
+        )
+        weak_sector_leader = (
+            (sector_df["Sector Relative Strength %"] < 0)
+            & (leader_adjustment > 0)
+        )
+        leader_adjustment = leader_adjustment.mask(
+            weak_sector_leader,
+            leader_adjustment * 0.5,
         )
         ranked_df.loc[sector_df.index, "Sector Leader Score"] = leader_score.round(2)
         ranked_df.loc[sector_df.index, "Sector Leader Adjustment"] = leader_adjustment.round(2)
@@ -3956,10 +4184,14 @@ def add_entry_quality_columns(
     df,
     sector_momentum=None,
     nifty_5d_return=0.0,
+    sector_breadth=None,
+    market_regime=None,
     ranking_weights=None,
     intraday=False,
 ):
     sector_momentum = sector_momentum or {}
+    sector_breadth = sector_breadth or {}
+    market_regime = market_regime or {"market_regime": "Unknown"}
     nifty_5d_return = to_number_or_none(nifty_5d_return) or 0.0
     ranking_weights = ranking_weights or RANKING_WEIGHTS
     ranked_df = df.copy()
@@ -3971,6 +4203,15 @@ def add_entry_quality_columns(
         ranked_df["Entry Quality"] = 0.0
         ranked_df["Sector Performance %"] = np.nan
         ranked_df["Sector Momentum Score"] = 0.0
+        ranked_df["Sector Breadth Above EMA20"] = np.nan
+        ranked_df["Sector Breadth Total"] = np.nan
+        ranked_df["Sector Breadth %"] = np.nan
+        ranked_df["Sector Breadth Text"] = None
+        ranked_df["Market Regime"] = market_regime.get("market_regime", "Unknown")
+        ranked_df["Market Breadth %"] = market_regime.get("market_breadth_pct")
+        ranked_df["Market Regime Multiplier"] = market_regime_score_multiplier(
+            market_regime.get("market_regime", "Unknown")
+        )
         ranked_df["Sector Relative Strength %"] = np.nan
         ranked_df["Relative Strength"] = np.nan
         ranked_df["Relative Strength Score"] = 0.0
@@ -3992,6 +4233,7 @@ def add_entry_quality_columns(
         ranked_df["Exhaustion Penalty"] = 0.0
         ranked_df["Raw Ranking Score"] = pd.Series(dtype=float)
         ranked_df["Ranking Score"] = pd.Series(dtype=float)
+        ranked_df["Confidence Grade"] = pd.Series(dtype=object)
         ranked_df["Sector"] = pd.Series(dtype=object)
         return ranked_df
     metrics = ranked_df.apply(calculate_entry_metrics, axis=1)
@@ -4004,6 +4246,25 @@ def add_entry_quality_columns(
     ranked_df["Score"] = pd.to_numeric(ranked_df["Score"], errors="coerce").fillna(0)
     ranked_df["Sector"] = ranked_df["Symbol"].apply(get_stock_sector)
     ranked_df["Sector Performance %"] = ranked_df["Sector"].map(sector_momentum).fillna(0.0)
+    ranked_df["Sector Breadth Above EMA20"] = ranked_df["Sector"].map(
+        lambda sector: sector_breadth.get(sector, {}).get("above")
+    )
+    ranked_df["Sector Breadth Total"] = ranked_df["Sector"].map(
+        lambda sector: sector_breadth.get(sector, {}).get("total")
+    )
+    ranked_df["Sector Breadth %"] = ranked_df["Sector"].map(
+        lambda sector: sector_breadth.get(sector, {}).get("pct")
+    )
+    ranked_df["Sector Breadth Text"] = ranked_df.apply(sector_breadth_text, axis=1)
+    ranked_df["Market Regime"] = market_regime.get("market_regime", "Unknown")
+    ranked_df["Market Breadth Above EMA20"] = market_regime.get("market_breadth_above_ema20")
+    ranked_df["Market Breadth Total"] = market_regime.get("market_breadth_total")
+    ranked_df["Market Breadth %"] = market_regime.get("market_breadth_pct")
+    ranked_df["Nifty Above EMA20"] = market_regime.get("nifty_above_ema20")
+    ranked_df["Nifty Above EMA50"] = market_regime.get("nifty_above_ema50")
+    ranked_df["Market Regime Multiplier"] = market_regime_score_multiplier(
+        market_regime.get("market_regime", "Unknown")
+    )
     ranked_df["Sector Relative Strength %"] = ranked_df["Sector Performance %"] - nifty_5d_return
     ranked_df["Sector Momentum Score"] = ranked_df["Sector Relative Strength %"].apply(sector_momentum_adjustment)
     ranked_df["Recent Return"] = pd.to_numeric(ranked_df["Recent Return"], errors="coerce")
@@ -4076,8 +4337,27 @@ def add_entry_quality_columns(
         + ranked_df["Gap Risk Penalty"]
     )
     ranked_df["Raw Ranking Score"] = raw_opportunity_score.round(3)
-    ranked_df["Ranking Score"] = normalize_opportunity_score(raw_opportunity_score).round(1)
+    base_ranking_score = normalize_opportunity_score(raw_opportunity_score)
+    ranked_df["Ranking Score Before Regime"] = base_ranking_score.round(1)
+    ranked_df["Ranking Score"] = (
+        base_ranking_score * ranked_df["Market Regime Multiplier"]
+    ).round(1)
+    ranked_df["Confidence Grade"] = ranked_df.apply(confidence_grade, axis=1)
     return ranked_df
+
+def confidence_grade(row):
+    opportunity_score = to_number_or_none(row.get("Ranking Score"))
+    if opportunity_score is None:
+        return "C"
+    if opportunity_score >= 90:
+        return "A+"
+    if opportunity_score >= 85:
+        return "A"
+    if opportunity_score >= 80:
+        return "B+"
+    if opportunity_score >= 70:
+        return "B"
+    return "C"
 
 def limit_top_picks_by_sector(df, max_per_sector=2, limit=5):
     if df.empty:
@@ -4132,6 +4412,14 @@ def format_percent(value, decimals=2):
         return "N/A"
     return f"{value:.{decimals}f}%"
 
+def setup_type_display_name(setup_type):
+    if not setup_type:
+        return "Unknown"
+    return SETUP_TYPE_LABELS.get(
+        setup_type,
+        str(setup_type).replace("_", " ").title(),
+    )
+
 def format_compact_currency(value):
     value = to_number_or_none(value)
     if value is None:
@@ -4143,6 +4431,10 @@ def format_compact_currency(value):
     return f"₹{value:.0f}"
 
 def ranking_audit_text(row):
+    grade = row.get("Confidence Grade") or confidence_grade(row)
+    market_regime = row.get("Market Regime") or "Unknown"
+    market_multiplier = to_number_or_none(row.get("Market Regime Multiplier")) or 1.0
+    market_breadth_pct = to_number_or_none(row.get("Market Breadth %"))
     exhaustion_penalty = to_number_or_none(row.get("Exhaustion Penalty")) or 0.0
     gap_risk_penalty = to_number_or_none(row.get("Gap Risk Penalty")) or 0.0
     fresh_breakout_bonus_value = to_number_or_none(row.get("Fresh Breakout Bonus")) or 0.0
@@ -4219,7 +4511,15 @@ def ranking_audit_text(row):
             f"({row.get('Setup Type') or 'setup'})"
         )
 
+    market_regime_text = f"Market Regime: {market_regime}"
+    if market_breadth_pct is not None:
+        market_regime_text += f" (Breadth: {market_breadth_pct:.0f}%)"
+    if market_multiplier < 1:
+        market_regime_text += f" | Regime Score Multiplier: {market_multiplier:.2f}"
+
     return (
+        f"Grade: {grade} | "
+        f"{market_regime_text} | "
         f"Opportunity Score: {format_number(row.get('Ranking Score'))} | "
         f"RS: {format_percent(row.get('Relative Strength'))} "
         f"({format_number(row.get('Relative Strength Score'), 1)}) | "
@@ -4228,6 +4528,7 @@ def ranking_audit_text(row):
         f"Sector: {row.get('Sector', 'Other')} "
         f"{format_percent(row.get('Sector Performance %'))} "
         f"(Rel: {format_percent(row.get('Sector Relative Strength %'))}) "
+        f" | {row.get('Sector Breadth Text') or sector_breadth_text(row)} "
         f"({format_number(row.get('Sector Momentum Score'), 1)}) | "
         f"RR: {format_number(row.get('Reward/Risk'))} | "
         f"Entry Gap: {format_percent(row.get('Entry Distance %'))} "
@@ -4333,7 +4634,8 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
         if not top_picks_df.empty:
             st.subheader("🏆 Today's Top 5 Stocks")
             for _, row in top_picks_df.iterrows():
-                with st.expander(f"{row['Symbol']} - {tooltip('Score', TOOLTIPS['Score'])}: {row['Score']}/7"):
+                grade = row.get("Confidence Grade") or confidence_grade(row)
+                with st.expander(f"{row['Symbol']} - Grade {grade} - {tooltip('Score', TOOLTIPS['Score'])}: {row['Score']}/7"):
                     current_price = row.get('Current Price', 'N/A')
                     buy_at = row.get('Buy At', 'N/A')
                     stop_loss = row.get('Stop Loss', 'N/A')
@@ -4344,6 +4646,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                         {tooltip('Current Price', TOOLTIPS['Stop Loss'])}: {format_currency(current_price)}  
                         Buy At: {format_currency(buy_at)} | Stop Loss: {format_currency(stop_loss)}  
                         Target: {format_currency(target)}  
+                        **Confidence Grade**: {grade}
                         **Audit**: {ranking_audit_text(row)}
                         **Hold Plan**:
                         {hold_advice}
@@ -4358,6 +4661,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                         {tooltip('Current Price', TOOLTIPS['Stop Loss'])}: {format_currency(current_price)}  
                         Buy At: {format_currency(buy_at)} | Stop Loss: {format_currency(stop_loss)}  
                         Target: {format_currency(target)}  
+                        **Confidence Grade**: {grade}
                         **Audit**: {ranking_audit_text(row)}
                         **Hold Plan**:
                         {hold_advice}
@@ -4417,7 +4721,8 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
         if not intraday_results.empty:
             st.subheader("🏆 Top 5 Intraday Stocks (⚡ Fast Exit)")
             for _, row in intraday_results.iterrows():
-                with st.expander(f"{row['Symbol']} - {tooltip('Score', TOOLTIPS['Score'])}: {row['Score']}/7"):
+                grade = row.get("Confidence Grade") or confidence_grade(row)
+                with st.expander(f"{row['Symbol']} - Grade {grade} - {tooltip('Score', TOOLTIPS['Score'])}: {row['Score']}/7"):
                     current_price = row.get('Current Price', 'N/A')
                     buy_at = row.get('Buy At', 'N/A')
                     stop_loss = row.get('Stop Loss', 'N/A')
@@ -4437,6 +4742,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                         {tooltip('Current Price', TOOLTIPS['Stop Loss'])}: {format_currency(current_price)}  
                         {buy_icon} {buy_label}: {format_currency(buy_at)} | Stop Loss: {format_currency(stop_loss)}  
                         Target: {format_currency(target)}  
+                        **Confidence Grade**: {grade}
                         **Audit**: {ranking_audit_text(row)}
                         Recommendation: {colored_recommendation(row.get('Recommendation', 'N/A'))}  
                         Regime: {row.get('Regime', 'N/A')}  
@@ -4459,6 +4765,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                         {tooltip('Current Price', TOOLTIPS['Stop Loss'])}: {format_currency(current_price)}  
                         {buy_icon} {buy_label}: {format_currency(buy_at)} | Stop Loss: {format_currency(stop_loss)}  
                         Target: {format_currency(target)}  
+                        **Confidence Grade**: {grade}
                         **Audit**: {ranking_audit_text(row)}
                         Intraday: {colored_recommendation(row.get('Intraday', 'N/A'))}
                         
@@ -4500,6 +4807,10 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                 filtered_df = filtered_df[filtered_df['date'] == date_filter]
             expectancy_df = holding_period_expectancy(history_df[history_df["pick_type"] == "daily"])
             setup_metrics_df = setup_holding_metrics(history_df[history_df["pick_type"] == "daily"])
+            setup_win_rate_df = setup_type_win_rate_table(history_df[history_df["pick_type"] == "daily"])
+            if not setup_win_rate_df.empty:
+                with st.expander("Setup-Type Win Rate", expanded=True):
+                    st.dataframe(setup_win_rate_df, use_container_width=True)
             if not setup_expectancy_df.empty:
                 with st.expander("Setup Expectancy Database", expanded=True):
                     st.dataframe(setup_expectancy_df, use_container_width=True)
