@@ -724,17 +724,59 @@ def fetch_nifty_5d_return():
 def fetch_nifty_intraday_return():
     return fetch_nifty_recent_return(interval="FIFTEEN_MINUTE", lookback_days=5, candles=5)
 
+def nifty_regime_snapshot_from_closes(closes, source):
+    close_series = pd.to_numeric(pd.Series(closes), errors="coerce").dropna()
+    if len(close_series) < 50:
+        return {}
+
+    close = float(close_series.iloc[-1])
+    ema20 = float(close_series.ewm(span=20, adjust=False).mean().iloc[-1])
+    ema50 = float(close_series.ewm(span=50, adjust=False).mean().iloc[-1])
+    return {
+        "nifty_close": close,
+        "nifty_ema20": ema20,
+        "nifty_ema50": ema50,
+        "nifty_above_ema20": close > ema20,
+        "nifty_above_ema50": close > ema50,
+        "nifty_regime_source": source,
+    }
+
+@st.cache_data(ttl=1800)
+def fetch_yahoo_nifty_regime_snapshot():
+    try:
+        response = requests.get(
+            "https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI",
+            params={"range": "6mo", "interval": "1d"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        result = (
+            payload.get("chart", {})
+            .get("result", [{}])[0]
+        )
+        closes = (
+            result.get("indicators", {})
+            .get("quote", [{}])[0]
+            .get("close", [])
+        )
+        return nifty_regime_snapshot_from_closes(closes, "Yahoo")
+    except Exception as e:
+        logging.warning(f"Failed to compute fallback Yahoo NIFTY market regime: {str(e)}")
+        return {}
+
 @st.cache_data(ttl=1800)
 def fetch_nifty_regime_snapshot():
     try:
         auth_error = get_smartapi_auth_error()
         if auth_error:
             logging.warning(f"Skipping NIFTY regime request: {auth_error}")
-            return {}
+            return fetch_yahoo_nifty_regime_snapshot()
 
         smart_api = get_smartapi_session(API_KEYS["Historical"], CLIENT_ID, PASSWORD, TOTP_SECRET)
         if not smart_api:
-            return {}
+            return fetch_yahoo_nifty_regime_snapshot()
 
         end_date = datetime.now()
         start_date = end_date - timedelta(days=120)
@@ -748,27 +790,14 @@ def fetch_nifty_regime_snapshot():
         })
 
         if not historical_data or not isinstance(historical_data, dict) or not historical_data.get("data"):
-            return {}
+            return fetch_yahoo_nifty_regime_snapshot()
 
         data = pd.DataFrame(historical_data["data"], columns=["Date", "Open", "High", "Low", "Close", "Volume"])
-        data["Close"] = pd.to_numeric(data["Close"], errors="coerce")
-        data = data.dropna(subset=["Close"])
-        if len(data) < 50:
-            return {}
-
-        close = float(data["Close"].iloc[-1])
-        ema20 = float(data["Close"].ewm(span=20, adjust=False).mean().iloc[-1])
-        ema50 = float(data["Close"].ewm(span=50, adjust=False).mean().iloc[-1])
-        return {
-            "nifty_close": close,
-            "nifty_ema20": ema20,
-            "nifty_ema50": ema50,
-            "nifty_above_ema20": close > ema20,
-            "nifty_above_ema50": close > ema50,
-        }
+        snapshot = nifty_regime_snapshot_from_closes(data["Close"], "SmartAPI")
+        return snapshot or fetch_yahoo_nifty_regime_snapshot()
     except Exception as e:
         logging.warning(f"Failed to compute NIFTY market regime: {str(e)}")
-        return {}
+        return fetch_yahoo_nifty_regime_snapshot()
 
 def calculate_advance_decline_ratio(stock_list):
     advances = 0
