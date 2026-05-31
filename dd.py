@@ -3140,10 +3140,19 @@ def expected_hold_text(row):
     setup_sample_count = int(similar_setup_stats.get("trades") or 0)
     has_setup_history = setup_sample_count >= MIN_HOLDING_PERIOD_SAMPLE_SIZE
     historical_win_rate = similar_setup_stats.get("win_rate") if has_setup_history else None
-    setup_confidence = setup_confidence_grade(historical_win_rate)
+    historical_win_rate_text = (
+        format_percent(historical_win_rate, 0)
+        if has_setup_history
+        else "Collecting Data"
+    )
+    setup_confidence = (
+        setup_confidence_grade(historical_win_rate)
+        if has_setup_history
+        else "Collecting Data"
+    )
     text = (
         f"Setup Type: {setup_type}  \n"
-        f"Historical Win Rate: {format_percent(historical_win_rate, 0)}  \n"
+        f"Historical Win Rate: {historical_win_rate_text}  \n"
         f"Confidence: {setup_confidence}  \n"
         f"Expected Hold: {int(expected_hold_days)} trading days  \n"
         f"Exit Review: {exit_review_day}"
@@ -3157,6 +3166,8 @@ def expected_hold_text(row):
             f"  \nSamples: {setup_sample_count}  \n"
             f"Avg Return: {format_percent(similar_setup_stats.get('avg_return'), 1)}"
         )
+    else:
+        text += f"  \nSample Size: {setup_sample_count}"
     probabilities = similar_setup_stats
     probability_parts = []
     for target_pct in PROBABILITY_TARGET_LEVELS:
