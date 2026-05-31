@@ -3971,7 +3971,8 @@ def sector_breadth_text(row):
     if above is None or total is None or total <= 0:
         return "N/A"
     sector = row.get("Sector") or "Sector"
-    return f"{sector} Breadth: {int(above)}/{int(total)} stocks above EMA20"
+    breadth_pct = above / total * 100
+    return f"{sector} Breadth: {breadth_pct:.0f}% ({int(above)}/{int(total)})"
 
 def market_regime_from_inputs(nifty_snapshot, breadth_summary):
     nifty_snapshot = nifty_snapshot or {}
