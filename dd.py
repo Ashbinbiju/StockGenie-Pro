@@ -4050,9 +4050,11 @@ def entry_distance_adjustment(distance_pct):
     if distance_pct <= 1:
         return 1.5
     if distance_pct <= 2:
-        return 1.0
+        return 0.8
+    if distance_pct <= 2.5:
+        return 0.2
     if distance_pct <= 3:
-        return 0.5
+        return 0.0
     return 0.0
 
 def liquidity_adjustment(avg_volume_value):
