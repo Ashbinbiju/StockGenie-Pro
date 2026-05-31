@@ -206,6 +206,9 @@ MAX_SETUP_EXPECTANCY_RANKING_ADJUSTMENT = 0.5
 WEAK_MARKET_REGIME_SCORE_MULTIPLIER = 0.90
 MARKET_REGIME_BULL_BREADTH_THRESHOLD = 60.0
 MARKET_REGIME_WEAK_BREADTH_THRESHOLD = 50.0
+WEAK_INDUSTRY_ADVANCE_RATIO_THRESHOLD = 0.20
+WEAK_INDUSTRY_SECTOR_LEADER_MULTIPLIER = 0.50
+WEAK_INDUSTRY_BREADTH_PENALTY = -0.30
 PROBABILITY_TARGET_LEVELS = [2, 4, 6]
 DEFAULT_OPTIMAL_HOLD_DAYS_BY_SETUP = {
     "fresh_breakout": 5,
@@ -3935,6 +3938,22 @@ def market_stats_sector_text(sector, market_stats):
     avg_change_text = f", Avg: {avg_change:.2f}%" if avg_change is not None else ""
     return f"{sector} Advance Breadth: {advancing}/{total}{avg_change_text}"
 
+def market_stats_sector_advance_ratio(sector, market_stats):
+    stats = market_stats_for_sector(sector, market_stats)
+    total = to_number_or_none(stats.get("total"))
+    advancing = to_number_or_none(stats.get("advancing"))
+    if total is None or total <= 0 or advancing is None:
+        return np.nan
+    return advancing / total
+
+def industry_breadth_penalty(advance_ratio):
+    advance_ratio = to_number_or_none(advance_ratio)
+    if advance_ratio is None:
+        return 0.0
+    if advance_ratio < WEAK_INDUSTRY_ADVANCE_RATIO_THRESHOLD:
+        return WEAK_INDUSTRY_BREADTH_PENALTY
+    return 0.0
+
 def sector_breadth_summary(sector_breadth):
     if not sector_breadth:
         return {"above": 0, "total": 0, "pct": None}
@@ -4164,6 +4183,12 @@ def sector_leader_adjustment_columns(ranked_df):
         ranked_df["Sector Relative Strength %"],
         errors="coerce",
     ).fillna(0.0)
+    if "Industry Advance Ratio" not in ranked_df.columns:
+        ranked_df["Industry Advance Ratio"] = np.nan
+    ranked_df["Industry Advance Ratio"] = pd.to_numeric(
+        ranked_df["Industry Advance Ratio"],
+        errors="coerce",
+    )
 
     for _, sector_df in ranked_df.groupby("Sector", dropna=False):
         if len(sector_df) < 2:
@@ -4176,6 +4201,13 @@ def sector_leader_adjustment_columns(ranked_df):
             )
             if (to_number_or_none(row.get("Sector Relative Strength %")) or 0.0) < 0:
                 singleton_adjustment *= 0.5
+            industry_advance_ratio = to_number_or_none(row.get("Industry Advance Ratio"))
+            if (
+                industry_advance_ratio is not None
+                and industry_advance_ratio < WEAK_INDUSTRY_ADVANCE_RATIO_THRESHOLD
+                and singleton_adjustment > 0
+            ):
+                singleton_adjustment *= WEAK_INDUSTRY_SECTOR_LEADER_MULTIPLIER
             ranked_df.loc[index, "Sector Leader Score"] = round(singleton_score, 2)
             ranked_df.loc[index, "Sector Leader Adjustment"] = round(singleton_adjustment, 2)
             continue
@@ -4212,6 +4244,14 @@ def sector_leader_adjustment_columns(ranked_df):
         leader_adjustment = leader_adjustment.mask(
             weak_sector_leader,
             leader_adjustment * 0.5,
+        )
+        weak_industry_leader = (
+            (sector_df["Industry Advance Ratio"] < WEAK_INDUSTRY_ADVANCE_RATIO_THRESHOLD)
+            & (leader_adjustment > 0)
+        )
+        leader_adjustment = leader_adjustment.mask(
+            weak_industry_leader,
+            leader_adjustment * WEAK_INDUSTRY_SECTOR_LEADER_MULTIPLIER,
         )
         ranked_df.loc[sector_df.index, "Sector Leader Score"] = leader_score.round(2)
         ranked_df.loc[sector_df.index, "Sector Leader Adjustment"] = leader_adjustment.round(2)
@@ -4343,6 +4383,8 @@ def add_entry_quality_columns(
         ranked_df["Market Breadth %"] = market_regime.get("market_breadth_pct")
         ranked_df["Market Breadth Source"] = market_regime.get("market_breadth_source")
         ranked_df["Industry Breadth Text"] = None
+        ranked_df["Industry Advance Ratio"] = np.nan
+        ranked_df["Industry Breadth Penalty"] = 0.0
         ranked_df["Market Regime Multiplier"] = market_regime_score_multiplier(
             market_regime.get("market_regime", "Unknown")
         )
@@ -4397,6 +4439,12 @@ def add_entry_quality_columns(
     ranked_df["Market Breadth Source"] = market_regime.get("market_breadth_source")
     ranked_df["Industry Breadth Text"] = ranked_df["Sector"].map(
         lambda sector: market_stats_sector_text(sector, market_regime.get("market_stats"))
+    )
+    ranked_df["Industry Advance Ratio"] = ranked_df["Sector"].map(
+        lambda sector: market_stats_sector_advance_ratio(sector, market_regime.get("market_stats"))
+    )
+    ranked_df["Industry Breadth Penalty"] = ranked_df["Industry Advance Ratio"].apply(
+        industry_breadth_penalty
     )
     ranked_df["Nifty Above EMA20"] = market_regime.get("nifty_above_ema20")
     ranked_df["Nifty Above EMA50"] = market_regime.get("nifty_above_ema50")
@@ -4471,6 +4519,7 @@ def add_entry_quality_columns(
         + ranked_df["Historical Expectancy Adjustment"]
         + ranked_df["Setup Expectancy Adjustment"]
         + ranked_df["Sector Exhaustion Penalty"]
+        + ranked_df["Industry Breadth Penalty"]
         + ranked_df["Exhaustion Penalty"]
         + ranked_df["Gap Risk Penalty"]
     )
@@ -4594,6 +4643,7 @@ def ranking_audit_text(row):
     sector_exhaustion_penalty_value = to_number_or_none(row.get("Sector Exhaustion Penalty")) or 0.0
     trend_persistence_adjustment_value = to_number_or_none(row.get("Trend Persistence Adjustment")) or 0.0
     sector_leader_adjustment_value = to_number_or_none(row.get("Sector Leader Adjustment")) or 0.0
+    industry_breadth_penalty_value = to_number_or_none(row.get("Industry Breadth Penalty")) or 0.0
     historical_expectancy_adjustment_value = to_number_or_none(row.get("Historical Expectancy Adjustment")) or 0.0
     setup_expectancy_adjustment_value = to_number_or_none(row.get("Setup Expectancy Adjustment")) or 0.0
     exhaustion_text = ""
@@ -4650,6 +4700,12 @@ def ranking_audit_text(row):
             f"({format_number(sector_leader_adjustment_value, 1)})"
         )
 
+    industry_breadth_penalty_text = ""
+    if industry_breadth_penalty_value < 0:
+        industry_breadth_penalty_text = (
+            f" | Industry Breadth Penalty: {format_number(industry_breadth_penalty_value, 1)}"
+        )
+
     historical_expectancy_text = ""
     if abs(historical_expectancy_adjustment_value) > 0:
         historical_expectancy_text = (
@@ -4704,6 +4760,7 @@ def ranking_audit_text(row):
         f"{consolidation_text}"
         f"{trend_persistence_text}"
         f"{sector_leader_text}"
+        f"{industry_breadth_penalty_text}"
         f"{historical_expectancy_text}"
         f"{setup_expectancy_text}"
         f"{sector_exhaustion_text}"
