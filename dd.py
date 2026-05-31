@@ -4096,6 +4096,13 @@ def downgrade_buy_signal_for_weak_market(value):
         return "Hold"
     return value
 
+def downgrade_intraday_signal_for_weak_market(value):
+    if not isinstance(value, str):
+        return value
+    if value.strip() == "Strong Buy":
+        return "Buy"
+    return value
+
 def apply_strict_weak_market_signal_downgrades(ranked_df):
     ranked_df["Weak Market Signal Downgrade"] = False
     if ranked_df.empty:
@@ -4104,6 +4111,11 @@ def apply_strict_weak_market_signal_downgrades(ranked_df):
     if not downgrade_mask.any():
         return ranked_df
     ranked_df.loc[downgrade_mask, "Weak Market Signal Downgrade"] = True
+    if "Intraday" in ranked_df.columns:
+        ranked_df.loc[downgrade_mask, "Intraday"] = ranked_df.loc[
+            downgrade_mask,
+            "Intraday",
+        ].apply(downgrade_intraday_signal_for_weak_market)
     for column in ("Swing", "Long-Term"):
         if column in ranked_df.columns:
             ranked_df.loc[downgrade_mask, column] = ranked_df.loc[
