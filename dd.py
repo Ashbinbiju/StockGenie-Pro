@@ -2780,6 +2780,8 @@ def init_database():
     conn.close()
 
 def insert_top_picks(results_df, pick_type="daily"):
+    if results_df is None or results_df.empty:
+        return 0
     conn = get_db_connection()
     cursor = conn.cursor()
     history_df = pd.read_sql_query("SELECT * FROM daily_picks WHERE pick_type = 'daily'", conn)
@@ -2846,6 +2848,7 @@ def insert_top_picks(results_df, pick_type="daily"):
     
     conn.commit()
     conn.close()
+    return len(data_to_insert)
 
 def calculate_holding_period_outcome(symbol, entry_date, entry_price):
     entry_price = to_float_or_none(entry_price)
@@ -4984,9 +4987,10 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
             progress_callback=lambda x: update_progress(progress_bar, loading_text, x, loading_messages)
         )
         
-        # Insert top picks as before
+        saved_picks_count = 0
         if not top_picks_df.empty:
-            insert_top_picks(top_picks_df, pick_type="daily")
+            saved_picks_count = insert_top_picks(top_picks_df, pick_type="daily")
+            st.session_state.last_daily_top_picks = top_picks_df.copy()
             
         progress_bar.empty()
         loading_text.empty()
@@ -4994,6 +4998,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
         # Display Top 5
         if not top_picks_df.empty:
             st.subheader("🏆 Today's Top 5 Stocks")
+            st.caption(f"Saved {saved_picks_count} picks to historical database: {DB_PATH}")
             for _, row in top_picks_df.iterrows():
                 grade = row.get("Confidence Grade") or confidence_grade(row)
                 with st.expander(f"{row['Symbol']} - Grade {grade} - {tooltip('Score', TOOLTIPS['Score'])}: {row['Score']}/7"):
@@ -5076,11 +5081,14 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
             batch_size=10,
             progress_callback=lambda x: update_progress(progress_bar, loading_text, x, loading_messages)
         )
-        insert_top_picks(intraday_results, pick_type="intraday")
+        saved_intraday_count = insert_top_picks(intraday_results, pick_type="intraday")
+        if not intraday_results.empty:
+            st.session_state.last_intraday_top_picks = intraday_results.copy()
         progress_bar.empty()
         loading_text.empty()
         if not intraday_results.empty:
             st.subheader("🏆 Top 5 Intraday Stocks (⚡ Fast Exit)")
+            st.caption(f"Saved {saved_intraday_count} picks to historical database: {DB_PATH}")
             for _, row in intraday_results.iterrows():
                 grade = row.get("Confidence Grade") or confidence_grade(row)
                 with st.expander(f"{row['Symbol']} - Grade {grade} - {tooltip('Score', TOOLTIPS['Score'])}: {row['Score']}/7"):
@@ -5183,7 +5191,22 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                     st.dataframe(expectancy_df, use_container_width=True)
             st.dataframe(filtered_df)
         else:
-            st.warning("⚠️ No historical data available.")
+            st.warning("⚠️ No historical data available in the SQLite database.")
+            st.caption(f"Database: {DB_PATH}")
+            session_frames = []
+            if isinstance(st.session_state.get("last_daily_top_picks"), pd.DataFrame):
+                latest_daily = st.session_state.last_daily_top_picks.copy()
+                latest_daily["pick_type"] = "daily"
+                latest_daily["date"] = app_date_string()
+                session_frames.append(latest_daily)
+            if isinstance(st.session_state.get("last_intraday_top_picks"), pd.DataFrame):
+                latest_intraday = st.session_state.last_intraday_top_picks.copy()
+                latest_intraday["pick_type"] = "intraday"
+                latest_intraday["date"] = app_date_string()
+                session_frames.append(latest_intraday)
+            if session_frames:
+                st.info("Showing current-session generated picks. The historical SQLite database did not retain rows.")
+                st.dataframe(pd.concat(session_frames, ignore_index=True))
 
     # Display stock analysis if symbol is available
     if st.session_state.symbol and st.session_state.data is not None and st.session_state.recommendations is not None:
