@@ -201,6 +201,8 @@ INTRADAY_OVERNIGHT_GAP_THRESHOLD = 3.0
 INTRADAY_GAP_RISK_PENALTY = 0.5
 HOLDING_PERIOD_DAYS = [1, 2, 3, 5, 10, 20]
 MIN_HOLDING_PERIOD_SAMPLE_SIZE = 3
+SETUP_EVIDENCE_MEDIUM_SAMPLE_SIZE = 15
+SETUP_EVIDENCE_HIGH_SAMPLE_SIZE = 50
 MAX_HISTORICAL_EXPECTANCY_RANKING_ADJUSTMENT = 0.6
 MAX_SETUP_EXPECTANCY_RANKING_ADJUSTMENT = 0.5
 WEAK_MARKET_REGIME_SCORE_MULTIPLIER = 0.90
@@ -2313,6 +2315,16 @@ def setup_confidence_grade(win_rate):
         return "B"
     return "C"
 
+def setup_evidence_level(sample_count):
+    sample_count = to_number_or_none(sample_count)
+    if sample_count is None:
+        sample_count = 0
+    if sample_count >= SETUP_EVIDENCE_HIGH_SAMPLE_SIZE:
+        return "High"
+    if sample_count >= SETUP_EVIDENCE_MEDIUM_SAMPLE_SIZE:
+        return "Medium"
+    return "Low"
+
 def learned_hold_days_lookup(history_df):
     metrics_df = setup_holding_metrics(history_df)
     if metrics_df.empty:
@@ -3139,7 +3151,13 @@ def expected_hold_text(row):
     exit_status = row.get("exit_status") or "HOLD"
     exit_reason = row.get("exit_reason")
     similar_setup_stats = setup_expectancy_stats.get(setup_type, {})
-    setup_sample_count = int(similar_setup_stats.get("trades") or 0)
+    row_sample_count = to_number_or_none(row.get("Setup Sample Size"))
+    setup_sample_count = int(
+        row_sample_count
+        if row_sample_count is not None
+        else similar_setup_stats.get("trades") or 0
+    )
+    setup_evidence = row.get("Setup Evidence") or setup_evidence_level(setup_sample_count)
     has_setup_history = setup_sample_count >= MIN_HOLDING_PERIOD_SAMPLE_SIZE
     historical_win_rate = similar_setup_stats.get("win_rate") if has_setup_history else None
     historical_win_rate_text = (
@@ -3156,6 +3174,7 @@ def expected_hold_text(row):
         f"Setup Type: {setup_type}  \n"
         f"Historical Win Rate: {historical_win_rate_text}  \n"
         f"Confidence: {setup_confidence}  \n"
+        f"Evidence: {setup_evidence}  \n"
         f"Expected Hold: {int(expected_hold_days)} trading days  \n"
         f"Exit Review: {exit_review_day}"
     )
@@ -3165,7 +3184,7 @@ def expected_hold_text(row):
         text += f"  \nExit Reason: {exit_reason}"
     if has_setup_history:
         text += (
-            f"  \nSamples: {setup_sample_count}  \n"
+            f"  \nSample Size: {setup_sample_count}  \n"
             f"Avg Return: {format_percent(similar_setup_stats.get('avg_return'), 1)}"
         )
     else:
@@ -4489,6 +4508,8 @@ def add_entry_quality_columns(
         ranked_df["Sector Leader Score"] = 0.5
         ranked_df["Sector Leader Adjustment"] = 0.0
         ranked_df["Setup Type"] = pd.Series(dtype=object)
+        ranked_df["Setup Sample Size"] = pd.Series(dtype=int)
+        ranked_df["Setup Evidence"] = pd.Series(dtype=object)
         ranked_df["Historical Expectancy Adjustment"] = 0.0
         ranked_df["Setup Expectancy Adjustment"] = 0.0
         ranked_df["Exhaustion Penalty"] = 0.0
@@ -4580,6 +4601,10 @@ def add_entry_quality_columns(
     ranked_df["Setup Type"] = ranked_df.apply(classify_setup_type, axis=1)
     expectancy_lookup = {} if intraday else load_historical_expectancy_lookup()
     setup_expectancy_stats = {} if intraday else load_setup_expectancy_lookup()
+    ranked_df["Setup Sample Size"] = ranked_df["Setup Type"].map(
+        lambda setup_type: int(setup_expectancy_stats.get(setup_type, {}).get("trades") or 0)
+    )
+    ranked_df["Setup Evidence"] = ranked_df["Setup Sample Size"].apply(setup_evidence_level)
     ranked_df["Historical Expectancy Adjustment"] = ranked_df.apply(
         lambda row: historical_expectancy_adjustment(row, expectancy_lookup),
         axis=1,
@@ -4731,6 +4756,14 @@ def format_yes_no(value):
 
 def ranking_audit_text(row):
     grade = row.get("Confidence Grade") or confidence_grade(row)
+    setup_sample_count = to_number_or_none(row.get("Setup Sample Size"))
+    setup_evidence = row.get("Setup Evidence")
+    setup_evidence_text = ""
+    if isinstance(setup_evidence, str) and setup_evidence.strip():
+        setup_evidence_text = f"Evidence: {setup_evidence}"
+        if setup_sample_count is not None:
+            setup_evidence_text += f"  \nSample Size: {int(setup_sample_count)}"
+        setup_evidence_text += "  \n"
     market_regime = row.get("Market Regime") or "Unknown"
     market_multiplier = to_number_or_none(row.get("Market Regime Multiplier")) or 1.0
     market_breadth_pct = to_number_or_none(row.get("Market Breadth %"))
@@ -4842,6 +4875,7 @@ def ranking_audit_text(row):
 
     return (
         f"Grade: {grade}  \n"
+        f"{setup_evidence_text}"
         f"{market_regime_text}  \n"
         f"Opportunity Score: {format_number(row.get('Ranking Score'))} | "
         f"RS: {format_percent(row.get('Relative Strength'))} "
