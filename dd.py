@@ -209,6 +209,7 @@ MARKET_REGIME_WEAK_BREADTH_THRESHOLD = 50.0
 STRICT_WEAK_MARKET_SIGNAL_BREADTH_THRESHOLD = 30.0
 WEAK_INDUSTRY_ADVANCE_RATIO_THRESHOLD = 0.20
 WEAK_INDUSTRY_SECTOR_LEADER_MULTIPLIER = 0.50
+MAX_WEAK_INDUSTRY_SECTOR_LEADER_ADJUSTMENT = 0.20
 WEAK_INDUSTRY_BREADTH_PENALTY = -0.30
 PROBABILITY_TARGET_LEVELS = [2, 4, 6]
 DEFAULT_OPTIMAL_HOLD_DAYS_BY_SETUP = {
@@ -4285,7 +4286,10 @@ def sector_leader_adjustment_columns(ranked_df):
                 and industry_advance_ratio < WEAK_INDUSTRY_ADVANCE_RATIO_THRESHOLD
                 and singleton_adjustment > 0
             ):
-                singleton_adjustment *= WEAK_INDUSTRY_SECTOR_LEADER_MULTIPLIER
+                singleton_adjustment = min(
+                    singleton_adjustment * WEAK_INDUSTRY_SECTOR_LEADER_MULTIPLIER,
+                    MAX_WEAK_INDUSTRY_SECTOR_LEADER_ADJUSTMENT,
+                )
             ranked_df.loc[index, "Sector Leader Score"] = round(singleton_score, 2)
             ranked_df.loc[index, "Sector Leader Adjustment"] = round(singleton_adjustment, 2)
             continue
@@ -4329,7 +4333,9 @@ def sector_leader_adjustment_columns(ranked_df):
         )
         leader_adjustment = leader_adjustment.mask(
             weak_industry_leader,
-            leader_adjustment * WEAK_INDUSTRY_SECTOR_LEADER_MULTIPLIER,
+            (leader_adjustment * WEAK_INDUSTRY_SECTOR_LEADER_MULTIPLIER).clip(
+                upper=MAX_WEAK_INDUSTRY_SECTOR_LEADER_ADJUSTMENT,
+            ),
         )
         ranked_df.loc[sector_df.index, "Sector Leader Score"] = leader_score.round(2)
         ranked_df.loc[sector_df.index, "Sector Leader Adjustment"] = leader_adjustment.round(2)
