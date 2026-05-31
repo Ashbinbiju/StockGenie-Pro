@@ -34,6 +34,13 @@ from streamlit import cache_data
 load_dotenv()
 APP_TIMEZONE = ZoneInfo("Asia/Kolkata")
 DB_PATH = Path(__file__).resolve().with_name("stock_picks.db")
+SYMBOL_ALIASES = {
+    "DBREALTY-EQ": "DBREALTY-BE",
+    "INDIGRID-EQ": "INDIGRID-IV",
+    "MINDSPACE-EQ": "MINDSPACE-RR",
+    "SPICEJET-EQ": "SPICEJET",
+    "STLTECH-EQ": "STLTECH-BE",
+}
 
 def app_now():
     return datetime.now(APP_TIMEZONE)
@@ -90,9 +97,28 @@ def load_symbol_token_map():
         response = requests.get(url)
         response.raise_for_status()
         data = response.json()
-        return {entry["symbol"]: entry["token"] for entry in data if "symbol" in entry and "token" in entry}
+        token_map = {entry["symbol"]: entry["token"] for entry in data if "symbol" in entry and "token" in entry}
+        for requested_symbol, tradable_symbol in SYMBOL_ALIASES.items():
+            if tradable_symbol in token_map:
+                token_map[requested_symbol] = token_map[tradable_symbol]
+        return token_map
     except Exception as e:
         st.warning(f"⚠️ Failed to load instrument list: {str(e)}")
+        return {}
+
+@st.cache_data(ttl=86400)
+def load_symbol_exchange_map():
+    try:
+        url = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+        exchange_map = {entry["symbol"]: entry["exch_seg"] for entry in data if "symbol" in entry and "exch_seg" in entry}
+        for requested_symbol, tradable_symbol in SYMBOL_ALIASES.items():
+            if tradable_symbol in exchange_map:
+                exchange_map[requested_symbol] = exchange_map[tradable_symbol]
+        return exchange_map
+    except Exception:
         return {}
 
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -626,6 +652,7 @@ def fetch_stock_data_with_auth(symbol, period="2y", interval="1d"):
         if not symboltoken:
             logging.warning(f"⚠️ Token not found for symbol: {symbol}")
             return pd.DataFrame()
+        exchange = load_symbol_exchange_map().get(symbol, "NSE")
 
         # Enforce rate limit before making the API call
         enforce_rate_limit()
@@ -634,7 +661,7 @@ def fetch_stock_data_with_auth(symbol, period="2y", interval="1d"):
         for attempt in range(3):
             try:
                 historical_data = smart_api.getCandleData({
-                    "exchange": "NSE",
+                    "exchange": exchange,
                     "symboltoken": symboltoken,
                     "interval": api_interval,
                     "fromdate": start_date.strftime("%Y-%m-%d %H:%M"),
