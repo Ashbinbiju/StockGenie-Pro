@@ -5040,7 +5040,33 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                         Ichimoku Trend: {colored_recommendation(row.get('Ichimoku_Trend', 'N/A'))}
                         """)
         else:
-            st.warning("⚠️ No top picks available due to data issues.")
+            successful_df = (
+                full_report_df[full_report_df["Status"] == "Success"].copy()
+                if not full_report_df.empty and "Status" in full_report_df.columns
+                else pd.DataFrame()
+            )
+            if successful_df.empty:
+                st.warning("No top picks available because no stocks completed successfully.")
+            else:
+                successful_df["Score"] = pd.to_numeric(successful_df["Score"], errors="coerce").fillna(0)
+                best_score = successful_df["Score"].max()
+                st.warning(
+                    "No top picks met the quality filters. "
+                    f"Best score was {best_score:.0f}/7; daily top picks require {MIN_TOP_PICK_SCORE}/7."
+                )
+                near_miss_columns = [
+                    column for column in [
+                        "Symbol", "Score", "Intraday", "Swing", "Short-Term", "Long-Term",
+                        "Breakout", "Ichimoku_Trend", "Current Price", "Buy At", "Target",
+                    ]
+                    if column in successful_df.columns
+                ]
+                st.caption("Best available candidates from this scan:")
+                st.dataframe(
+                    successful_df.sort_values("Score", ascending=False)
+                    .head(5)[near_miss_columns],
+                    use_container_width=True,
+                )
             
         # --- STRATEGY EXECUTION DETAILS (New Section) ---
         if not full_report_df.empty:
