@@ -206,6 +206,7 @@ MAX_SETUP_EXPECTANCY_RANKING_ADJUSTMENT = 0.5
 WEAK_MARKET_REGIME_SCORE_MULTIPLIER = 0.90
 MARKET_REGIME_BULL_BREADTH_THRESHOLD = 60.0
 MARKET_REGIME_WEAK_BREADTH_THRESHOLD = 50.0
+STRICT_WEAK_MARKET_SIGNAL_BREADTH_THRESHOLD = 30.0
 WEAK_INDUSTRY_ADVANCE_RATIO_THRESHOLD = 0.20
 WEAK_INDUSTRY_SECTOR_LEADER_MULTIPLIER = 0.50
 WEAK_INDUSTRY_BREADTH_PENALTY = -0.30
@@ -4029,6 +4030,69 @@ def market_regime_snapshot(sector_breadth, market_stats=None):
 def market_regime_score_multiplier(market_regime):
     return WEAK_MARKET_REGIME_SCORE_MULTIPLIER if market_regime == "Weak" else 1.0
 
+def is_explicit_false(value):
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() in {"false", "no", "0"}
+    try:
+        if pd.isna(value):
+            return False
+    except TypeError:
+        pass
+    if isinstance(value, (bool, np.bool_)):
+        return not bool(value)
+    return False
+
+def is_explicit_true(value):
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "yes", "1"}
+    try:
+        if pd.isna(value):
+            return False
+    except TypeError:
+        pass
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    return False
+
+def is_strict_weak_market_context(row):
+    breadth_pct = to_number_or_none(row.get("Market Breadth %"))
+    if breadth_pct is None or breadth_pct >= STRICT_WEAK_MARKET_SIGNAL_BREADTH_THRESHOLD:
+        return False
+    return (
+        is_explicit_false(row.get("Nifty Above EMA20"))
+        and is_explicit_false(row.get("Nifty Above EMA50"))
+    )
+
+def downgrade_buy_signal_for_weak_market(value):
+    if not isinstance(value, str):
+        return value
+    signal = value.strip()
+    if signal == "Strong Buy":
+        return "Buy"
+    if signal == "Buy":
+        return "Hold"
+    return value
+
+def apply_strict_weak_market_signal_downgrades(ranked_df):
+    ranked_df["Weak Market Signal Downgrade"] = False
+    if ranked_df.empty:
+        return ranked_df
+    downgrade_mask = ranked_df.apply(is_strict_weak_market_context, axis=1)
+    if not downgrade_mask.any():
+        return ranked_df
+    ranked_df.loc[downgrade_mask, "Weak Market Signal Downgrade"] = True
+    for column in ("Swing", "Long-Term"):
+        if column in ranked_df.columns:
+            ranked_df.loc[downgrade_mask, column] = ranked_df.loc[
+                downgrade_mask,
+                column,
+            ].apply(downgrade_buy_signal_for_weak_market)
+    return ranked_df
+
 def sector_momentum_adjustment(sector_perf):
     sector_perf = to_number_or_none(sector_perf)
     if sector_perf is None:
@@ -4399,6 +4463,7 @@ def add_entry_quality_columns(
         ranked_df["Industry Breadth Text"] = None
         ranked_df["Industry Advance Ratio"] = np.nan
         ranked_df["Industry Breadth Penalty"] = 0.0
+        ranked_df["Weak Market Signal Downgrade"] = False
         ranked_df["Market Regime Multiplier"] = market_regime_score_multiplier(
             market_regime.get("market_regime", "Unknown")
         )
@@ -4543,6 +4608,7 @@ def add_entry_quality_columns(
     ranked_df["Ranking Score"] = (
         base_ranking_score * ranked_df["Market Regime Multiplier"]
     ).round(1)
+    ranked_df = apply_strict_weak_market_signal_downgrades(ranked_df)
     ranked_df["Confidence Grade"] = ranked_df.apply(confidence_grade, axis=1)
     return ranked_df
 
@@ -4665,6 +4731,7 @@ def ranking_audit_text(row):
     market_breadth_source = row.get("Market Breadth Source")
     nifty_above_ema20 = row.get("Nifty Above EMA20")
     nifty_above_ema50 = row.get("Nifty Above EMA50")
+    weak_market_signal_downgrade = is_explicit_true(row.get("Weak Market Signal Downgrade"))
     exhaustion_penalty = to_number_or_none(row.get("Exhaustion Penalty")) or 0.0
     gap_risk_penalty = to_number_or_none(row.get("Gap Risk Penalty")) or 0.0
     fresh_breakout_bonus_value = to_number_or_none(row.get("Fresh Breakout Bonus")) or 0.0
@@ -4758,6 +4825,8 @@ def ranking_audit_text(row):
         market_regime_text += "  \nBreadth Source: Market Stats"
     if market_multiplier < 1:
         market_regime_text += f"  \nRegime Score Multiplier: {market_multiplier:.2f}"
+    if weak_market_signal_downgrade:
+        market_regime_text += "  \nSignal Downgrade: Strict Weak Market"
 
     industry_breadth_text = row.get("Industry Breadth Text")
     if industry_breadth_text:
