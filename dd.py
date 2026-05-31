@@ -3172,9 +3172,11 @@ def expected_hold_text(row):
     )
     text = (
         f"Setup Type: {setup_type}  \n"
-        f"Historical Win Rate: {historical_win_rate_text}  \n"
+        f"Historical Performance  \n"
+        f"Win Rate: {historical_win_rate_text}  \n"
         f"Confidence: {setup_confidence}  \n"
         f"Evidence: {setup_evidence}  \n"
+        f"Sample Size: {setup_sample_count}  \n"
         f"Expected Hold: {int(expected_hold_days)} trading days  \n"
         f"Exit Review: {exit_review_day}"
     )
@@ -3184,11 +3186,8 @@ def expected_hold_text(row):
         text += f"  \nExit Reason: {exit_reason}"
     if has_setup_history:
         text += (
-            f"  \nSample Size: {setup_sample_count}  \n"
-            f"Avg Return: {format_percent(similar_setup_stats.get('avg_return'), 1)}"
+            f"  \nAvg Return: {format_percent(similar_setup_stats.get('avg_return'), 1)}"
         )
-    else:
-        text += f"  \nSample Size: {setup_sample_count}"
     probabilities = similar_setup_stats
     probability_parts = []
     for target_pct in PROBABILITY_TARGET_LEVELS:
@@ -4756,14 +4755,6 @@ def format_yes_no(value):
 
 def ranking_audit_text(row):
     grade = row.get("Confidence Grade") or confidence_grade(row)
-    setup_sample_count = to_number_or_none(row.get("Setup Sample Size"))
-    setup_evidence = row.get("Setup Evidence")
-    setup_evidence_text = ""
-    if isinstance(setup_evidence, str) and setup_evidence.strip():
-        setup_evidence_text = f"Evidence: {setup_evidence}"
-        if setup_sample_count is not None:
-            setup_evidence_text += f"  \nSample Size: {int(setup_sample_count)}"
-        setup_evidence_text += "  \n"
     market_regime = row.get("Market Regime") or "Unknown"
     market_multiplier = to_number_or_none(row.get("Market Regime Multiplier")) or 1.0
     market_breadth_pct = to_number_or_none(row.get("Market Breadth %"))
@@ -4875,7 +4866,6 @@ def ranking_audit_text(row):
 
     return (
         f"Grade: {grade}  \n"
-        f"{setup_evidence_text}"
         f"{market_regime_text}  \n"
         f"Opportunity Score: {format_number(row.get('Ranking Score'))} | "
         f"RS: {format_percent(row.get('Relative Strength'))} "
