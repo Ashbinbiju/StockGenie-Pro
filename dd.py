@@ -4538,15 +4538,29 @@ def confidence_grade(row):
     opportunity_score = to_number_or_none(row.get("Ranking Score"))
     if opportunity_score is None:
         return "C"
+    market_regime = row.get("Market Regime") or "Unknown"
     if opportunity_score >= 90:
-        return "A+"
-    if opportunity_score >= 85:
-        return "A"
-    if opportunity_score >= 80:
-        return "B+"
-    if opportunity_score >= 70:
-        return "B"
-    return "C"
+        grade = "A+"
+    elif opportunity_score >= 85:
+        grade = "A"
+    elif opportunity_score >= 80:
+        grade = "B+"
+    elif opportunity_score >= 70:
+        grade = "B"
+    elif opportunity_score >= 60:
+        grade = "C+"
+    else:
+        grade = "C"
+
+    grade_order = ["C", "C+", "B", "B+", "A", "A+"]
+    regime_caps = {
+        "Neutral": "A",
+        "Weak": "B+",
+    }
+    grade_cap = regime_caps.get(str(market_regime).strip().title())
+    if grade_cap and grade_order.index(grade) > grade_order.index(grade_cap):
+        return grade_cap
+    return grade
 
 def limit_top_picks_by_sector(df, max_per_sector=2, limit=5):
     if df.empty:
