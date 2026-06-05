@@ -3702,6 +3702,32 @@ def to_number_or_none(value):
     except (TypeError, ValueError):
         return None
 
+def entry_display_details(current_price, buy_at, entry_type="Standard", include_breakout_context=False):
+    if isinstance(buy_at, tuple):
+        buy_at, tuple_entry_type = buy_at
+        entry_type = tuple_entry_type or entry_type
+
+    normalized_type = str(entry_type or "").strip().lower()
+    current = to_float_or_none(current_price)
+    entry = to_float_or_none(buy_at)
+    breakout_label = "Buy Above (Breakout)" if include_breakout_context else "Buy Above"
+
+    if normalized_type == "choppy":
+        return "⚠️", "No Trade", "Choppy"
+
+    if current is not None and entry is not None:
+        if entry < current:
+            return "🔵", "Wait for Pullback", buy_at
+        if entry > current:
+            return "🟢", breakout_label, buy_at
+        return "", "Buy Near CMP", buy_at
+
+    if normalized_type == "breakout":
+        return "🟢", breakout_label, buy_at
+    if normalized_type == "pullback":
+        return "🔵", "Wait for Pullback", buy_at
+    return "", "Buy At", buy_at
+
 def calculate_recent_return(data, candles=5):
     if data.empty or "Close" not in data.columns or len(data) < 2:
         return np.nan
@@ -4901,7 +4927,7 @@ def ranking_audit_text(row):
     if weak_market_signal_downgrade:
         market_regime_text += "  \nSignal Downgrade: Strict Weak Market"
 
-    industry_breadth_text = row.get("Industry Breadth Text")
+    industry_breadth_text = clean_display_text(row.get("Industry Breadth Text"), fallback="")
     if industry_breadth_text:
         industry_breadth_text = f" | {industry_breadth_text} "
     else:
@@ -5035,10 +5061,15 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                     stop_loss = row.get('Stop Loss', 'N/A')
                     target = row.get('Target', 'N/A')
                     hold_advice = expected_hold_text(row)
+                    buy_icon, buy_label, buy_display_value = entry_display_details(
+                        current_price,
+                        buy_at,
+                        row.get('Entry Type', 'Standard')
+                    )
                     if st.session_state.recommendation_mode == "Adaptive":
                         st.markdown(f"""
                         {tooltip('Current Price', TOOLTIPS['Stop Loss'])}: {format_currency(current_price)}  
-                        Buy At: {format_currency(buy_at)} | Stop Loss: {format_currency(stop_loss)}  
+                        {buy_icon} {buy_label}: {format_currency(buy_display_value)} | Stop Loss: {format_currency(stop_loss)}  
                         Target: {format_currency(target)}  
                         **Confidence Grade**: {grade}
                         **Audit**: {ranking_audit_text(row)}
@@ -5053,7 +5084,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                     else:
                         st.markdown(f"""
                         {tooltip('Current Price', TOOLTIPS['Stop Loss'])}: {format_currency(current_price)}  
-                        Buy At: {format_currency(buy_at)} | Stop Loss: {format_currency(stop_loss)}  
+                        {buy_icon} {buy_label}: {format_currency(buy_display_value)} | Stop Loss: {format_currency(stop_loss)}  
                         Target: {format_currency(target)}  
                         **Confidence Grade**: {grade}
                         **Audit**: {ranking_audit_text(row)}
@@ -5150,20 +5181,16 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                     buy_at = row.get('Buy At', 'N/A')
                     stop_loss = row.get('Stop Loss', 'N/A')
                     target = row.get('Target', 'N/A')
+                    buy_icon, buy_label, buy_display_value = entry_display_details(
+                        current_price,
+                        buy_at,
+                        row.get('Entry Type', 'Standard'),
+                        include_breakout_context=True
+                    )
                     if st.session_state.recommendation_mode == "Adaptive":
-                        buy_label = "Buy At"
-                        buy_icon = ""
-                        entry_type = row.get('Entry Type', 'Standard')
-                        if entry_type == "Breakout":
-                             buy_label = "Buy Above (Breakout)"
-                             buy_icon = "🟢"
-                        elif entry_type == "Pullback":
-                             buy_label = "Buy On Pullback"
-                             buy_icon = "🔵"
-                            
                         st.markdown(f"""
                         {tooltip('Current Price', TOOLTIPS['Stop Loss'])}: {format_currency(current_price)}  
-                        {buy_icon} {buy_label}: {format_currency(buy_at)} | Stop Loss: {format_currency(stop_loss)}  
+                        {buy_icon} {buy_label}: {format_currency(buy_display_value)} | Stop Loss: {format_currency(stop_loss)}  
                         Target: {format_currency(target)}  
                         **Confidence Grade**: {grade}
                         **Audit**: {ranking_audit_text(row)}
@@ -5174,19 +5201,9 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                         Reason: {row.get('Reason', 'N/A')}
                         """)
                     else:
-                        buy_label = "Buy At"
-                        buy_icon = ""
-                        entry_type = row.get('Entry Type', 'Standard')
-                        if entry_type == "Breakout":
-                             buy_label = "Buy Above (Breakout)"
-                             buy_icon = "🟢"
-                        elif entry_type == "Pullback":
-                             buy_label = "Buy On Pullback"
-                             buy_icon = "🔵"
-
                         st.markdown(f"""
                         {tooltip('Current Price', TOOLTIPS['Stop Loss'])}: {format_currency(current_price)}  
-                        {buy_icon} {buy_label}: {format_currency(buy_at)} | Stop Loss: {format_currency(stop_loss)}  
+                        {buy_icon} {buy_label}: {format_currency(buy_display_value)} | Stop Loss: {format_currency(stop_loss)}  
                         Target: {format_currency(target)}  
                         **Confidence Grade**: {grade}
                         **Audit**: {ranking_audit_text(row)}
@@ -5283,19 +5300,14 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
             with col2:
                 buy_at = recommendations.get('Buy At', 'N/A')
                 entry_type = recommendations.get('Entry Type', 'Standard')
-                if isinstance(buy_at, tuple):
-                    buy_at, tuple_entry_type = buy_at
-                    entry_type = tuple_entry_type or entry_type
-                label = "Buy At"
-                if entry_type == "Breakout":
-                    label = "🟢 Buy Above"
-                elif entry_type == "Pullback":
-                    label = "🔵 Buy Pullback"
-                elif entry_type == "Choppy":
-                    label = "⚠️ No Trade"
-                    buy_at = "Choppy"
+                buy_icon, buy_label, buy_display_value = entry_display_details(
+                    current_price,
+                    buy_at,
+                    entry_type
+                )
+                label = f"{buy_icon} {buy_label}".strip()
                 
-                st.metric(label, format_currency(buy_at))
+                st.metric(label, format_currency(buy_display_value))
             with col3:
                 stop_loss = recommendations.get('Stop Loss', 'N/A')
                 st.metric(tooltip("Stop Loss", TOOLTIPS['Stop Loss']), format_currency(stop_loss))
