@@ -661,6 +661,10 @@ def fetch_stock_data_with_auth(symbol, period="2y", interval="1d"):
         # Retry logic for API instability
         for attempt in range(3):
             try:
+                if not smart_api or not hasattr(smart_api, "getCandleData"):
+                    logging.error(f"SmartAPI client unavailable for {symbol}; skipping candle request.")
+                    return pd.DataFrame()
+
                 historical_data = smart_api.getCandleData({
                     "exchange": exchange,
                     "symboltoken": symboltoken,
@@ -692,6 +696,9 @@ def fetch_stock_data_with_auth(symbol, period="2y", interval="1d"):
                     logging.warning(f"⚠️ Invalid Token for {symbol} (AG8001). Clearing cache & re-logging in...")
                     st.cache_resource.clear() # Clear cached session
                     smart_api = get_smartapi_session(API_KEYS["Historical"], CLIENT_ID, PASSWORD, TOTP_SECRET) # Get fresh session
+                    if not smart_api:
+                        logging.error(f"SmartAPI re-login failed after invalid token for {symbol}; skipping candle request.")
+                        return pd.DataFrame()
                     time.sleep(1) # Slight pause before retry
                     continue # Retry loop with new session
 
