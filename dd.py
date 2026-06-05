@@ -239,6 +239,7 @@ WEAK_INDUSTRY_ADVANCE_RATIO_THRESHOLD = 0.20
 WEAK_INDUSTRY_SECTOR_LEADER_MULTIPLIER = 0.50
 MAX_WEAK_INDUSTRY_SECTOR_LEADER_ADJUSTMENT = 0.20
 WEAK_INDUSTRY_BREADTH_PENALTY = -0.30
+BANK_WEAK_MARKET_SECTOR_SCORE_PENALTY = -0.40
 PROBABILITY_TARGET_LEVELS = [2, 4, 6]
 DEFAULT_OPTIMAL_HOLD_DAYS_BY_SETUP = {
     "fresh_breakout": 5,
@@ -3650,6 +3651,18 @@ def colored_recommendation(recommendation):
     else:
         return f"⚪ {recommendation}"
 
+def swing_signal_for_grade(grade):
+    grade = str(grade or "").strip().upper()
+    return {
+        "A+": "Strong Buy",
+        "A": "Strong Buy",
+        "B+": "Buy",
+        "B": "Buy",
+        "C+": "WATCHLIST",
+        "C": "AVOID",
+        "D": "AVOID",
+    }.get(grade, "WATCHLIST")
+
 def clean_display_text(value, fallback="—"):
     if isinstance(value, tuple):
         value = value[0]
@@ -4143,6 +4156,16 @@ def is_strict_weak_market_context(row):
         and is_explicit_false(row.get("Nifty Above EMA50"))
     )
 
+def bank_weak_market_sector_penalty(row):
+    if str(row.get("Sector") or "").strip().lower() != "bank":
+        return 0.0
+    if (
+        is_explicit_false(row.get("Nifty Above EMA20"))
+        and is_explicit_false(row.get("Nifty Above EMA50"))
+    ):
+        return BANK_WEAK_MARKET_SECTOR_SCORE_PENALTY
+    return 0.0
+
 def downgrade_buy_signal_for_weak_market(value):
     if not isinstance(value, str):
         return value
@@ -4557,6 +4580,7 @@ def add_entry_quality_columns(
         ranked_df["Industry Advance Ratio"] = np.nan
         ranked_df["Industry Breadth Penalty"] = 0.0
         ranked_df["Weak Market Signal Downgrade"] = False
+        ranked_df["Bank Weak Market Penalty"] = 0.0
         ranked_df["Market Regime Multiplier"] = market_regime_score_multiplier(
             market_regime.get("market_regime", "Unknown")
         )
@@ -4627,6 +4651,10 @@ def add_entry_quality_columns(
     )
     ranked_df["Sector Relative Strength %"] = ranked_df["Sector Performance %"] - nifty_5d_return
     ranked_df["Sector Momentum Score"] = ranked_df["Sector Relative Strength %"].apply(sector_momentum_adjustment)
+    ranked_df["Bank Weak Market Penalty"] = ranked_df.apply(bank_weak_market_sector_penalty, axis=1)
+    ranked_df["Sector Momentum Score"] = (
+        ranked_df["Sector Momentum Score"] + ranked_df["Bank Weak Market Penalty"]
+    )
     ranked_df["Recent Return"] = pd.to_numeric(ranked_df["Recent Return"], errors="coerce")
     ranked_df["Relative Strength"] = ranked_df["Recent Return"] - nifty_5d_return
     ranked_df["Relative Strength Score"] = ranked_df["Relative Strength"].apply(relative_strength_adjustment)
@@ -4838,6 +4866,7 @@ def ranking_audit_text(row):
     trend_persistence_adjustment_value = to_number_or_none(row.get("Trend Persistence Adjustment")) or 0.0
     sector_leader_adjustment_value = to_number_or_none(row.get("Sector Leader Adjustment")) or 0.0
     industry_breadth_penalty_value = to_number_or_none(row.get("Industry Breadth Penalty")) or 0.0
+    bank_weak_market_penalty_value = to_number_or_none(row.get("Bank Weak Market Penalty")) or 0.0
     historical_expectancy_adjustment_value = to_number_or_none(row.get("Historical Expectancy Adjustment")) or 0.0
     setup_expectancy_adjustment_value = to_number_or_none(row.get("Setup Expectancy Adjustment")) or 0.0
     exhaustion_text = ""
@@ -4900,6 +4929,12 @@ def ranking_audit_text(row):
             f" | Industry Breadth Penalty: {format_number(industry_breadth_penalty_value, 1)}"
         )
 
+    bank_weak_market_penalty_text = ""
+    if bank_weak_market_penalty_value < 0:
+        bank_weak_market_penalty_text = (
+            f" | Bank Weak Market: {format_number(bank_weak_market_penalty_value, 1)}"
+        )
+
     historical_expectancy_text = ""
     if abs(historical_expectancy_adjustment_value) > 0:
         historical_expectancy_text = (
@@ -4957,6 +4992,7 @@ def ranking_audit_text(row):
         f"{trend_persistence_text}"
         f"{sector_leader_text}"
         f"{industry_breadth_penalty_text}"
+        f"{bank_weak_market_penalty_text}"
         f"{historical_expectancy_text}"
         f"{setup_expectancy_text}"
         f"{sector_exhaustion_text}"
@@ -5055,6 +5091,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
             st.caption(f"Saved {saved_picks_count} picks to historical database: {DB_PATH}")
             for _, row in top_picks_df.iterrows():
                 grade = row.get("Confidence Grade") or confidence_grade(row)
+                swing_signal = swing_signal_for_grade(grade)
                 with st.expander(f"{row['Symbol']} - Grade {grade} - {tooltip('Score', TOOLTIPS['Score'])}: {row['Score']}/7"):
                     current_price = row.get('Current Price', 'N/A')
                     buy_at = row.get('Buy At', 'N/A')
@@ -5091,7 +5128,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                         **Hold Plan**:
                         {hold_advice}
                         Intraday: {colored_recommendation(row.get('Intraday', 'N/A'))}  
-                        Swing: {colored_recommendation(row.get('Swing', 'N/A'))}  
+                        Swing: {colored_recommendation(swing_signal)}  
                         Short-Term: {colored_recommendation(row.get('Short-Term', 'N/A'))}  
                         Long-Term: {colored_recommendation(row.get('Long-Term', 'N/A'))}  
                         Mean Reversion: {colored_recommendation(row.get('Mean_Reversion', 'N/A'))}  
