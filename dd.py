@@ -471,6 +471,11 @@ MARKET_STATS_INDUSTRY_ALIASES = {
     "Plastic": "Chemicals",
     "ShipBuilding": "Capital Goods",
     "Media": "Media Entertainment & Publication",
+    "Footwear": "Consumer Durables",
+    "Manufacturing": "Capital Goods",
+    "Paper": "Forest Materials",
+    "ContainersPackaging": "Forest Materials",
+    "PhotographicProducts": "Consumer Durables",
     "Metals": "Metals & Mining",
     "OilGas": "Oil Gas & Consumable Fuels",
     "Power": "Power",
@@ -769,8 +774,31 @@ SECTORS = {
         "LELAVOIR-EQ"
     ],
     "Media": [
-        "ZEEL-EQ", "SUNTV-EQ", "TVTODAY-EQ",
-        "SAREGAMA-EQ"
+        "ZEEL-EQ", "SUNTV-EQ", "PVRINOX-EQ", "SAREGAMA-EQ", "TIPSMUSIC-EQ",
+        "NETWORK18-EQ", "NDTV-EQ"
+    ],
+    "Footwear": [
+        "METROBRAND-EQ", "BATAINDIA-EQ", "RELAXO-EQ", "REDTAPE-EQ", "CAMPUS-EQ",
+        "LEHAR-EQ", "LIBERTSHOE-EQ", "MIRZAINT-EQ", "KHADIM-EQ", "KSRSHOE-EQ"
+    ],
+    "Manufacturing": [
+        "GRINDWELL-EQ", "CARBORUNIV-EQ", "TITAGARH-EQ", "TEXRAIL-EQ", "WENDT-EQ",
+        "VRAJ-EQ", "SONAMAC-EQ"
+    ],
+    "Paper": [
+        "JKPAPER-EQ", "WSTCSTPAPR-EQ", "KSMART-EQ", "SESHAPAPER-EQ", "ANDHRAPAP-EQ",
+        "TNPL-EQ", "NRAIL-EQ", "PDMJEPAPER-EQ", "KUANTUM-EQ", "SATIA-EQ",
+        "EMAMIPAP-EQ", "PAKKA-EQ", "RUCHIRA-EQ", "GENUSPAPER-EQ", "ORIENTPPR-EQ",
+        "SHREERAMA-EQ"
+    ],
+    "ContainersPackaging": [
+        "AGI-EQ", "UFLEX-EQ", "JINDALPOLY-EQ", "TCPLPACK-EQ", "COSMOFIRST-EQ",
+        "HUHTAMAKI-EQ", "ESTER-EQ", "PYRAMID-EQ", "KANPRPLA-EQ", "BBTCL-EQ",
+        "SHAJITPULP-EQ", "HCPPLASTENE-EQ", "EMMBI-EQ", "BILCARE-EQ", "GUJCON-EQ",
+        "ROLLT-EQ", "JUMBO-EQ", "DUROPACK-EQ"
+    ],
+    "PhotographicProducts": [
+        "JINDALPHOT-EQ", "CHOKSI-EQ"
     ],
     "ConsumerDurables": [
         "LGELECTRON-EQ", "DIXON-EQ", "VOLTAS-EQ", "BLUESTARCO-EQ", "HONAUT-EQ",
