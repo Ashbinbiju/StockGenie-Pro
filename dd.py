@@ -3054,7 +3054,7 @@ def setup_expectancy_bonus(setup_expectancy, avg_dd):
         2,
     )
 
-def refresh_setup_expectancy_database():
+def refresh_setup_expectancy_database(sync_backup=True):
     conn = get_db_connection()
     try:
         history_df = pd.read_sql_query("SELECT * FROM daily_picks WHERE pick_type = 'daily'", conn)
@@ -3128,7 +3128,8 @@ def refresh_setup_expectancy_database():
         conn.commit()
         conn.close()
         conn = None
-        sync_history_backup()
+        if sync_backup:
+            sync_history_backup()
         return len(rows)
     except sqlite3.OperationalError as e:
         if conn is not None:
@@ -3547,7 +3548,7 @@ def calculate_exit_advice(
         "exit_advice_updated_at": app_timestamp_string(),
     }
 
-def update_exit_advice(limit=50):
+def update_exit_advice(limit=50, sync_backup=True):
     conn = get_db_connection()
     try:
         ensure_daily_pick_lifecycle_columns(conn)
@@ -3609,7 +3610,7 @@ def update_exit_advice(limit=50):
         conn.commit()
         conn.close()
         conn = None
-        if updated:
+        if updated and sync_backup:
             sync_history_backup()
         return updated
     except sqlite3.OperationalError as e:
@@ -3621,7 +3622,7 @@ def update_exit_advice(limit=50):
         if conn is not None:
             conn.close()
 
-def update_holding_period_outcomes(limit=50):
+def update_holding_period_outcomes(limit=50, sync_backup=True):
     conn = get_db_connection()
     try:
         ensure_daily_pick_lifecycle_columns(conn)
@@ -3683,7 +3684,7 @@ def update_holding_period_outcomes(limit=50):
         conn.commit()
         conn.close()
         conn = None
-        if updated:
+        if updated and sync_backup:
             sync_history_backup()
         return updated
     except sqlite3.OperationalError as e:
@@ -5856,9 +5857,11 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
     # Historical picks button
     if st.button("📜 View Historical Picks"):
         with st.spinner("Updating holding-period outcomes..."):
-            updated_outcomes = update_holding_period_outcomes()
-            updated_exit_advice = update_exit_advice()
-            updated_setup_expectancy = refresh_setup_expectancy_database()
+            updated_outcomes = update_holding_period_outcomes(sync_backup=False)
+            updated_exit_advice = update_exit_advice(sync_backup=False)
+            updated_setup_expectancy = refresh_setup_expectancy_database(sync_backup=False)
+            if updated_outcomes or updated_exit_advice or updated_setup_expectancy:
+                sync_history_backup()
         conn = get_db_connection()
         history_df = pd.read_sql_query("SELECT * FROM daily_picks ORDER BY date DESC", conn)
         setup_expectancy_df = pd.read_sql_query("SELECT * FROM setup_expectancy ORDER BY setup_expectancy DESC", conn)
