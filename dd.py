@@ -2593,7 +2593,7 @@ def generate_recommendations(data, symbol=None):
 
         final_score = buy_score - sell_score
         if recommendations["Major Trend Conflict"]:
-            final_score = min(final_score, MIN_TOP_PICK_SCORE - 1)
+            final_score = 0
         recommendations["Score"] = min(max(final_score, -7), 7)
     except Exception as e:
         st.warning(f"⚠️ Error generating recommendations: {str(e)}")
