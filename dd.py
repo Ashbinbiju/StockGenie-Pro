@@ -366,6 +366,8 @@ smartapi_auth_error = None
 smartapi_auth_lock = threading.Lock()
 NIFTY_50_TOKEN = "99926000"
 MIN_TOP_PICK_SCORE = 5
+PUBLIC_SHARE_MIN_GRADE = "B"
+PUBLIC_SHARE_ALLOWED_SWING = ["Buy", "Strong Buy"]
 RANKING_WEIGHTS = {
     "relative_strength": 0.35,
     "rvol": 0.25,
@@ -3725,6 +3727,8 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
 
     if not top_picks_df.empty:
         top_picks_df = top_picks_df[top_picks_df.apply(is_swing_quality_setup, axis=1)]
+    if not top_picks_df.empty:
+        top_picks_df = top_picks_df[top_picks_df.apply(is_public_share_swing_pick, axis=1)]
     top_picks_df = top_picks_df.sort_values(
         by=["Ranking Score", "Reward/Risk", "Score"],
         ascending=[False, False, False]
@@ -3900,6 +3904,22 @@ def clean_display_text(value, fallback="—"):
     if not text or text.lower() == "nan":
         return fallback
     return text
+
+def grade_meets_minimum(grade, minimum_grade):
+    grade_order = ["D", "C", "C+", "B", "B+", "A", "A+"]
+    grade = str(grade or "").strip().upper()
+    minimum_grade = str(minimum_grade or "").strip().upper()
+    if grade not in grade_order or minimum_grade not in grade_order:
+        return False
+    return grade_order.index(grade) >= grade_order.index(minimum_grade)
+
+def is_public_share_swing_pick(row):
+    grade = row.get("Confidence Grade") or confidence_grade(row)
+    displayed_swing_signal = swing_signal_for_grade(grade)
+    return (
+        grade_meets_minimum(grade, PUBLIC_SHARE_MIN_GRADE)
+        and displayed_swing_signal in PUBLIC_SHARE_ALLOWED_SWING
+    )
 
 def is_valid_price(value):
     if isinstance(value, tuple):
@@ -5381,28 +5401,13 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                 st.warning("No top picks available because no stocks completed successfully.")
             elif st.session_state.get("show_buy_above_cmp_only", False):
                 st.warning(
-                    "No Buy Above CMP setups matched the current filters. "
-                    "Turn off 'Only show Buy Above CMP setups' to include Wait for Pullback candidates."
+                    "No valid Buy Above CMP swing picks today. "
+                    "Market weak. Wait for better setup."
                 )
             else:
-                successful_df["Score"] = pd.to_numeric(successful_df["Score"], errors="coerce").fillna(0)
-                best_score = successful_df["Score"].max()
                 st.warning(
-                    "No top picks met the quality filters. "
-                    f"Best score was {best_score:.0f}/7; daily top picks require {MIN_TOP_PICK_SCORE}/7."
-                )
-                near_miss_columns = [
-                    column for column in [
-                        "Symbol", "Score", "Intraday", "Swing", "Short-Term", "Long-Term",
-                        "Breakout", "Ichimoku_Trend", "Current Price", "Buy At", "Target",
-                    ]
-                    if column in successful_df.columns
-                ]
-                st.caption("Best available candidates from this scan:")
-                st.dataframe(
-                    successful_df.sort_values("Score", ascending=False)
-                    .head(5)[near_miss_columns],
-                    use_container_width=True,
+                    "No valid swing picks today. "
+                    "Market weak. Wait for better setup."
                 )
             
         # --- STRATEGY EXECUTION DETAILS (New Section) ---
