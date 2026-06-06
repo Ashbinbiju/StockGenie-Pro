@@ -1452,18 +1452,27 @@ def get_dynamic_rsi_window(data):
         return 14
 
 def detect_divergence(data):
-    recent = data[['Close', 'RSI']].dropna().tail(5)
-    if len(recent) < 5:
+    recent = data[['Close', 'RSI']].tail(5)
+    if len(recent) < 5 or recent.isna().any().any():
         return "No Divergence"
 
-    price = recent['Close'].reset_index(drop=True)
-    rsi = recent['RSI'].reset_index(drop=True)
-    recent_highs = int(price.idxmax())
-    recent_lows = int(price.idxmin())
-    rsi_highs = int(rsi.idxmax())
-    rsi_lows = int(rsi.idxmin())
-    bullish_div = (recent_lows > rsi_lows) and (price.iloc[recent_lows] < price.iloc[-1]) and (rsi.iloc[rsi_lows] < rsi.iloc[-1])
-    bearish_div = (recent_highs < rsi_highs) and (price.iloc[recent_highs] > price.iloc[-1]) and (rsi.iloc[rsi_highs] > rsi.iloc[-1])
+    price = recent['Close'].to_numpy(dtype=float)
+    rsi = recent['RSI'].to_numpy(dtype=float)
+    last_pos = len(price) - 1
+    price_high_pos = int(np.argmax(price))
+    price_low_pos = int(np.argmin(price))
+    rsi_high_pos = int(np.argmax(rsi))
+    rsi_low_pos = int(np.argmin(rsi))
+    bullish_div = (
+        price_low_pos > rsi_low_pos
+        and price[price_low_pos] < price[last_pos]
+        and rsi[rsi_low_pos] < rsi[last_pos]
+    )
+    bearish_div = (
+        price_high_pos < rsi_high_pos
+        and price[price_high_pos] > price[last_pos]
+        and rsi[rsi_high_pos] > rsi[last_pos]
+    )
     return "Bullish Divergence" if bullish_div else "Bearish Divergence" if bearish_div else "No Divergence"
 
 def calculate_cmo(close, window=14):
