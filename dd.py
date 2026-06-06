@@ -500,6 +500,7 @@ smartapi_auth_error = None
 smartapi_auth_lock = threading.Lock()
 NIFTY_50_TOKEN = "99926000"
 MIN_TOP_PICK_SCORE = 5
+MIN_INTRADAY_TOP_PICK_SCORE = 3
 PUBLIC_SHARE_MIN_GRADE = "B"
 PUBLIC_SHARE_ALLOWED_SWING = ["Buy", "Strong Buy"]
 PUBLIC_SHARE_MIN_LIQUIDITY_CR = 20
@@ -4176,7 +4177,7 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
     results_df = results_df[results_df.apply(is_actionable_entry, axis=1)]
     if results_df.empty:
         return pd.DataFrame()
-    results_df = results_df[results_df["Score"] >= MIN_TOP_PICK_SCORE]
+    results_df = results_df[results_df["Score"] >= MIN_INTRADAY_TOP_PICK_SCORE]
     if results_df.empty:
         return pd.DataFrame()
         
