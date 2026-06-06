@@ -3335,71 +3335,77 @@ def insert_top_picks(results_df, pick_type="daily"):
     if results_df is None or results_df.empty:
         return 0
     conn = get_db_connection()
-    cursor = conn.cursor()
-    history_df = pd.read_sql_query("SELECT * FROM daily_picks WHERE pick_type = 'daily'", conn)
-    learned_lookup = learned_hold_days_lookup(history_df)
-    
-    data_to_insert = []
-    for _, row in results_df.head(5).iterrows():
-        setup_type = classify_setup_type(row)
-        expected_hold_days = expected_hold_days_for_setup(setup_type, learned_lookup)
-        exit_review_day = exit_review_schedule_text(setup_type, expected_hold_days)
-        data_to_insert.append((
-            app_date_string(),
-            row.get('Symbol'),
-            db_value(row.get('Score', 0)),
-            db_value(row.get('Current Price')),
-            db_value(row.get('Buy At')),
-            db_value(row.get('Stop Loss')),
-            db_value(row.get('Target')),
-            row.get('Intraday'),
-            row.get('Swing'),
-            row.get('Short-Term'),
-            row.get('Long-Term'),
-            row.get('Mean_Reversion'),
-            row.get('Breakout'),
-            row.get('Ichimoku_Trend'),
-            row.get('Recommendation'),
-            row.get('Regime'),
-            db_value(row.get('Position Size')),
-            db_value(row.get('Trailing Stop')),
-            row.get('Reason'),
-            pick_type,
-            app_date_string(),
-            db_value(row.get('Buy At') or row.get('Current Price')),
-            setup_type,
-            row.get('Sector'),
-            db_value(row.get('Relative Strength')),
-            db_value(row.get('Sector Relative Strength %')),
-            db_value(row.get('Trend Persistence')),
-            db_value(row.get('RVOL')),
-            db_value(row.get('Avg Volume Value')),
-            db_value(row.get('Fresh Breakout Age')),
-            db_value(row.get('EMA20 Distance %')),
-            db_value(row.get('Sector Leader Score')),
-            db_value(row.get('Sector Leader Adjustment')),
-            expected_hold_days,
-            expected_hold_days,
-            exit_review_day,
-            "HOLD",
-            f"Initial advisory hold for {setup_type}; review on {exit_review_day}."
-        ))
+    try:
+        cursor = conn.cursor()
+        history_df = pd.read_sql_query("SELECT * FROM daily_picks WHERE pick_type = 'daily'", conn)
+        learned_lookup = learned_hold_days_lookup(history_df)
+        
+        data_to_insert = []
+        for _, row in results_df.head(5).iterrows():
+            setup_type = classify_setup_type(row)
+            expected_hold_days = expected_hold_days_for_setup(setup_type, learned_lookup)
+            exit_review_day = exit_review_schedule_text(setup_type, expected_hold_days)
+            data_to_insert.append((
+                app_date_string(),
+                row.get('Symbol'),
+                db_value(row.get('Score', 0)),
+                db_value(row.get('Current Price')),
+                db_value(row.get('Buy At')),
+                db_value(row.get('Stop Loss')),
+                db_value(row.get('Target')),
+                row.get('Intraday'),
+                row.get('Swing'),
+                row.get('Short-Term'),
+                row.get('Long-Term'),
+                row.get('Mean_Reversion'),
+                row.get('Breakout'),
+                row.get('Ichimoku_Trend'),
+                row.get('Recommendation'),
+                row.get('Regime'),
+                db_value(row.get('Position Size')),
+                db_value(row.get('Trailing Stop')),
+                row.get('Reason'),
+                pick_type,
+                app_date_string(),
+                db_value(row.get('Buy At') or row.get('Current Price')),
+                setup_type,
+                row.get('Sector'),
+                db_value(row.get('Relative Strength')),
+                db_value(row.get('Sector Relative Strength %')),
+                db_value(row.get('Trend Persistence')),
+                db_value(row.get('RVOL')),
+                db_value(row.get('Avg Volume Value')),
+                db_value(row.get('Fresh Breakout Age')),
+                db_value(row.get('EMA20 Distance %')),
+                db_value(row.get('Sector Leader Score')),
+                db_value(row.get('Sector Leader Adjustment')),
+                expected_hold_days,
+                expected_hold_days,
+                exit_review_day,
+                "HOLD",
+                f"Initial advisory hold for {setup_type}; review on {exit_review_day}."
+            ))
 
-    cursor.executemany('''
-        INSERT OR REPLACE INTO daily_picks (
-            date, symbol, score, current_price, buy_at, stop_loss, target,
-            intraday, swing, short_term, long_term, mean_reversion, breakout,
-            ichimoku_trend, recommendation, regime, position_size, trailing_stop,
-            reason, pick_type, entry_date, entry_price, setup_type, sector,
-            relative_strength, sector_relative_strength, trend_persistence,
-            rvol, liquidity_value, breakout_age, ema20_distance,
-            sector_leader_score, sector_leader_adjustment, optimal_hold_days,
-            expected_hold_days, exit_review_day, exit_status, exit_reason
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', data_to_insert)
-    
-    conn.commit()
-    conn.close()
+        cursor.executemany('''
+            INSERT OR REPLACE INTO daily_picks (
+                date, symbol, score, current_price, buy_at, stop_loss, target,
+                intraday, swing, short_term, long_term, mean_reversion, breakout,
+                ichimoku_trend, recommendation, regime, position_size, trailing_stop,
+                reason, pick_type, entry_date, entry_price, setup_type, sector,
+                relative_strength, sector_relative_strength, trend_persistence,
+                rvol, liquidity_value, breakout_age, ema20_distance,
+                sector_leader_score, sector_leader_adjustment, optimal_hold_days,
+                expected_hold_days, exit_review_day, exit_status, exit_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', data_to_insert)
+        
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
     sync_history_backup()
     return len(data_to_insert)
 
