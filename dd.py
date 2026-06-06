@@ -503,6 +503,9 @@ NIFTY_50_TOKEN = "99926000"
 MIN_TOP_PICK_SCORE = 5
 PUBLIC_SHARE_MIN_GRADE = "B"
 PUBLIC_SHARE_ALLOWED_SWING = ["Buy", "Strong Buy"]
+PUBLIC_SHARE_MIN_LIQUIDITY_CR = 20
+PUBLIC_SHARE_MIN_LIQUIDITY_VALUE = PUBLIC_SHARE_MIN_LIQUIDITY_CR * 10_000_000
+PUBLIC_SHARE_MIN_LIQUIDITY_SCORE = 0.5
 RANKING_WEIGHTS = {
     "relative_strength": 0.35,
     "rvol": 0.25,
@@ -4236,9 +4239,15 @@ def grade_meets_minimum(grade, minimum_grade):
 def is_public_share_swing_pick(row):
     grade = row.get("Confidence Grade") or confidence_grade(row)
     displayed_swing_signal = swing_signal_for_grade(grade)
+    avg_volume_value = to_number_or_none(row.get("Avg Volume Value"))
+    liquidity_score = to_number_or_none(row.get("Liquidity Score"))
     return (
         grade_meets_minimum(grade, PUBLIC_SHARE_MIN_GRADE)
         and displayed_swing_signal in PUBLIC_SHARE_ALLOWED_SWING
+        and avg_volume_value is not None
+        and avg_volume_value >= PUBLIC_SHARE_MIN_LIQUIDITY_VALUE
+        and liquidity_score is not None
+        and liquidity_score >= PUBLIC_SHARE_MIN_LIQUIDITY_SCORE
     )
 
 def is_valid_price(value):
@@ -5723,12 +5732,12 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
             elif st.session_state.get("show_buy_above_cmp_only", False):
                 st.warning(
                     "No valid Buy Above CMP swing picks today. "
-                    "Market weak. Wait for better setup."
+                    "Quality/liquidity filters did not pass. Wait for better setup."
                 )
             else:
                 st.warning(
                     "No valid swing picks today. "
-                    "Market weak. Wait for better setup."
+                    "Quality/liquidity filters did not pass. Wait for better setup."
                 )
             
         # --- STRATEGY EXECUTION DETAILS (New Section) ---
