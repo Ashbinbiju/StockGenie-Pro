@@ -3509,6 +3509,9 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
         )
         top_picks_df = ranked_success_df[buy_signal]
 
+    if st.session_state.get("show_buy_above_cmp_only", False) and not top_picks_df.empty:
+        top_picks_df = top_picks_df[top_picks_df.apply(is_buy_above_cmp_setup, axis=1)]
+
     if not top_picks_df.empty:
         top_picks_df = top_picks_df[top_picks_df.apply(is_swing_quality_setup, axis=1)]
     top_picks_df = top_picks_df.sort_values(
@@ -3630,6 +3633,8 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
         results_df = results_df[results_df["Recommendation"].str.contains("Buy", na=False)]
     else:
         results_df = results_df[results_df["Intraday"].str.contains("Buy", na=False)]
+    if st.session_state.get("show_buy_above_cmp_only", False) and not results_df.empty:
+        results_df = results_df[results_df.apply(is_buy_above_cmp_setup, axis=1)]
     results_df = add_entry_quality_columns(
         results_df,
         sector_momentum,
@@ -3706,6 +3711,11 @@ def to_float_or_none(value):
     if not is_valid_price(value):
         return None
     return float(value)
+
+def is_buy_above_cmp_setup(row):
+    current = to_float_or_none(row.get("Current Price"))
+    entry = to_float_or_none(row.get("Buy At"))
+    return current is not None and entry is not None and entry > current
 
 def to_number_or_none(value):
     if isinstance(value, tuple):
@@ -5050,6 +5060,13 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
         key="selected_sectors",
         help="Choose one or more sectors to analyze. Select 'All' to include all sectors."
     )
+    if 'show_buy_above_cmp_only' not in st.session_state:
+        st.session_state.show_buy_above_cmp_only = False
+    st.sidebar.checkbox(
+        "Only show Buy Above CMP setups",
+        key="show_buy_above_cmp_only",
+        help="Hide entries below or at current price, including Wait for Pullback setups."
+    )
 
     if "All" in selected_sectors:
         selected_stocks = list(set([stock for sector in SECTORS.values() for stock in sector]))
@@ -5150,6 +5167,11 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
             )
             if successful_df.empty:
                 st.warning("No top picks available because no stocks completed successfully.")
+            elif st.session_state.get("show_buy_above_cmp_only", False):
+                st.warning(
+                    "No Buy Above CMP setups matched the current filters. "
+                    "Turn off 'Only show Buy Above CMP setups' to include Wait for Pullback candidates."
+                )
             else:
                 successful_df["Score"] = pd.to_numeric(successful_df["Score"], errors="coerce").fillna(0)
                 best_score = successful_df["Score"].max()
@@ -5260,7 +5282,13 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                         {clean_display_text(row.get('Entry Strategy'))}
                         """)
         else:
-            st.warning("⚠️ No intraday picks available due to data issues.")
+            if st.session_state.get("show_buy_above_cmp_only", False):
+                st.warning(
+                    "No Buy Above CMP intraday setups matched the current filters. "
+                    "Turn off 'Only show Buy Above CMP setups' to include Wait for Pullback candidates."
+                )
+            else:
+                st.warning("⚠️ No intraday picks available due to data issues.")
 
     # Historical picks button
     if st.button("📜 View Historical Picks"):
