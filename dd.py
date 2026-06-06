@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from functools import lru_cache
 from tqdm import tqdm
 import plotly.express as px
 import time
@@ -1251,7 +1250,6 @@ def fetch_stock_data_with_auth(symbol, period="2y", interval="1d"):
         logging.warning(f"⚠️ Error fetching data for {symbol}: {str(e)}")
         return pd.DataFrame()
 
-@lru_cache(maxsize=1000)
 def fetch_stock_data_cached(symbol, period="2y", interval="1d"):
     return fetch_stock_data_with_auth(symbol, period, interval)
 
