@@ -466,6 +466,10 @@ MARKET_STATS_INDUSTRY_ALIASES = {
     "Hospitality": "Consumer Services",
     "Textiles": "Textiles",
     "Industrial_Gases_Fuels": "Oil Gas & Consumable Fuels",
+    "Logistics": "Services",
+    "Alcohol": "Fast Moving Consumer Goods",
+    "Plastic": "Chemicals",
+    "ShipBuilding": "Capital Goods",
     "Media": "Media Entertainment & Publication",
     "Metals": "Metals & Mining",
     "OilGas": "Oil Gas & Consumable Fuels",
@@ -645,7 +649,7 @@ SECTORS = {
         "GODREJIND-EQ", "HSCL-EQ", "SUMICHEM-EQ", "DEEPAKNTR-EQ", "ATUL-EQ",
         "BAYERCROP-EQ", "CHAMBLFERT-EQ", "TATACHEM-EQ", "DEEPAKFERT-EQ", "KANSAINER-EQ",
         "AARTIIND-EQ", "ANURAS-EQ", "AETHER-EQ", "BASF-EQ", "FINEORG-EQ",
-        "VINATIORGA-EQ", "PARADEEP-EQ", "SUPPETRO-EQ", "PRIVISCL-EQ", "PCBL-EQ",
+        "PARADEEP-EQ", "SUPPETRO-EQ", "PRIVISCL-EQ", "PCBL-EQ",
         "JUBLINGREA-EQ", "ALKYLAMINE-EQ", "CLEAN-EQ", "SHARDACROP-EQ", "GNFC-EQ",
         "SUDARSCHEM-EQ", "RCF-EQ", "RAIN-EQ", "BALAMINES-EQ", "INDIAGLYCO-EQ",
         "GSFC-EQ", "AWHCL-EQ", "GALAXYSURF-EQ", "NEOGEN-EQ", "EPIGRAL-EQ",
@@ -814,7 +818,7 @@ SECTORS = {
         "INDHOTEL-EQ", "ITCHOTELS-EQ", "EIHOTEL-EQ", "CHALET-EQ", "TRAVELFOOD-EQ",
         "VENTIVE-EQ", "SCHLOSS-EQ", "TBOTEK-EQ", "BLS-EQ", "LEMONTREE-EQ",
         "WESTLIFE-EQ", "IXIGO-EQ", "INDTOUR-EQ", "JUNIPER-EQ", "THOMASCOOK-EQ",
-        "MAHLOG-EQ", "SAMHI-EQ", "WONDERLA-EQ", "BRIGADEHOT-EQ", "TAJGVK-EQ",
+        "SAMHI-EQ", "WONDERLA-EQ", "BRIGADEHOT-EQ", "TAJGVK-EQ",
         "ORIENTHOT-EQ", "EIHAHOTELS-EQ", "YATRA-EQ", "BENARAS-EQ", "ASIANHOTNR-EQ",
         "VICEROY-EQ", "ROHLTD-EQ", "UPHOTELS-EQ", "ECOSMOBLTY-EQ", "ADVANIHOTR-EQ",
         "KAMATHOTEL-EQ", "SPECIALITY-EQ", "SAYAJIHOTL-EQ", "SINCLAIR-EQ", "NICCOPARK-EQ",
@@ -832,13 +836,36 @@ SECTORS = {
         "ATGL-EQ", "GUJGASLTD-EQ", "IGL-EQ", "MGL-EQ", "REFEX-EQ",
         "CONFIPET-EQ", "AGARIND-EQ", "ELLEN-EQ"
     ],
+    "Logistics": [
+        "CONCOR-EQ", "DELHIVERY-EQ", "AEGISLOG-EQ", "AEGISVOPAK-EQ", "GESHIP-EQ",
+        "SCI-EQ", "BLUEDART-EQ", "GPPL-EQ", "TCI-EQ", "TVSSCS-EQ",
+        "VRLLOG-EQ", "SEAMECLTD-EQ", "MAHLOG-EQ", "DREDGECORP-EQ", "TCIEXP-EQ",
+        "NAVKARCORP-EQ", "RITCO-EQ", "GLOTTIS-EQ", "SICALLOG-EQ", "IWARE-EQ",
+        "AVG-EQ", "OMFREIGHT-EQ", "SADHAV-EQ", "ASPINWALL-EQ", "RAPIDFLEET-EQ",
+        "CROWN-EQ", "SANCO-EQ", "KESARTERM-EQ", "REPONO-EQ", "HARIYANA-EQ",
+        "ABCINDQ-EQ"
+    ],
+    "Alcohol": [
+        "MCDOWELL-N-EQ", "RADICO-EQ", "UBL-EQ", "ABDL-EQ", "TI-EQ",
+        "PICCADIL-EQ", "GLOBUSSPR-EQ", "GMBREW-EQ", "SDBL-EQ", "ASALCBR-EQ",
+        "SULA-EQ", "VINATIORGA-EQ", "JAGAJITIND-EQ", "MONIKA-EQ", "NORSPIRITS-EQ",
+        "ALCOBEX-EQ", "SILVEROAK-EQ"
+    ],
+    "Plastic": [
+        "SUPREMEIND-EQ", "ASTRAL-EQ", "SHAILY-EQ", "GARFIBRES-EQ", "FINPIPE-EQ",
+        "TIMETECHNO-EQ", "KINGFA-EQ", "EPL-EQ", "CARYSIL-EQ", "PRINCEPIPE-EQ",
+        "DDEVPLSTIK-EQ", "MOLDTKPAC-EQ", "APOLLOPIPE-EQ", "NILKAMAL-EQ", "PLATIND-EQ",
+        "ARROWGREEN-EQ"
+    ],
+    "ShipBuilding": [
+        "MAZDOCK-EQ", "COCHINSHIP-EQ", "GRSE-EQ"
+    ],
     "Defence": [
         "HAL-EQ", "BEL-EQ", "BDL-EQ", "PARAS-EQ", "BEML-EQ",
-        "MAZDOCK-EQ", "COCHINSHIP-EQ", "GRSE-EQ", "DATAPATTNS-EQ", "AZAD-EQ",
-        "SOLARINDS-EQ"
+        "DATAPATTNS-EQ", "AZAD-EQ", "SOLARINDS-EQ"
     ],
     "Consumer Services": [
-        "ETERNAL-EQ", "NYKAA-EQ", "ADANIPORTS-EQ", "IRCTC-EQ", "PAYTM-EQ", "INDHOTEL-EQ", "NAUKRI-EQ", "DELHIVERY-EQ",
+        "ETERNAL-EQ", "NYKAA-EQ", "ADANIPORTS-EQ", "IRCTC-EQ", "PAYTM-EQ", "INDHOTEL-EQ", "NAUKRI-EQ",
         "JUBLFOOD-EQ", "DEVYANI-EQ", "WESTLIFE-EQ", "SAPPHIRE-EQ", "BIKAJI-EQ",
         "IXIGO-EQ", "TEAMLEASE-EQ", "QUESS-EQ", "FSL-EQ",
         "MINDSPACE-EQ", "CIEINDIA-EQ", "VMART-EQ", "SHOPERSTOP-EQ",
