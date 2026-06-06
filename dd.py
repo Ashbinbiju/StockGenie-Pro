@@ -1728,8 +1728,9 @@ def analyze_stock(data, interval="1d"):
 
     try:
         if can_compute_indicator(data, 'Fibonacci'):
-            high = data['High'].max()
-            low = data['Low'].min()
+            recent_swing = data.tail(50)
+            high = recent_swing['High'].max()
+            low = recent_swing['Low'].min()
             diff = high - low
             data['Fib_23.6'] = high - diff * 0.236
             data['Fib_38.2'] = high - diff * 0.382
