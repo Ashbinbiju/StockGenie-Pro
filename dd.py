@@ -24,6 +24,7 @@ import itertools
 from arch import arch_model
 import warnings
 import sqlite3
+import base64
 from diskcache import Cache
 from SmartApi import SmartConnect
 import pyotp
@@ -33,7 +34,33 @@ from streamlit import cache_data
 
 load_dotenv()
 APP_TIMEZONE = ZoneInfo("Asia/Kolkata")
-DB_PATH = Path(__file__).resolve().with_name("stock_picks.db")
+DEFAULT_DB_PATH = Path(__file__).resolve().with_name("stock_picks.db")
+
+def resolve_database_path():
+    configured_path = (
+        os.getenv("STOCKGENIE_DB_PATH")
+        or os.getenv("DATABASE_PATH")
+        or os.getenv("DB_PATH")
+    )
+    if not configured_path:
+        try:
+            configured_path = (
+                st.secrets.get("STOCKGENIE_DB_PATH")
+                or st.secrets.get("DATABASE_PATH")
+                or st.secrets.get("DB_PATH")
+            )
+        except Exception:
+            configured_path = None
+
+    if not configured_path:
+        return DEFAULT_DB_PATH
+
+    db_path = Path(str(configured_path)).expanduser()
+    if not db_path.is_absolute():
+        db_path = Path(__file__).resolve().parent / db_path
+    return db_path
+
+DB_PATH = resolve_database_path()
 SYMBOL_ALIASES = {
     "DBREALTY-EQ": "DBREALTY-BE",
     "INDIGRID-EQ": "INDIGRID-IV",
@@ -52,6 +79,7 @@ def app_timestamp_string():
     return app_now().strftime('%Y-%m-%d %H:%M:%S')
 
 def get_db_connection():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     return sqlite3.connect(DB_PATH)
 
 def get_config_value_with_source(*names):
@@ -89,6 +117,169 @@ def mask_secret(value):
     if len(text) <= 4:
         return "*" * len(text)
     return f"{text[:2]}{'*' * max(len(text) - 4, 4)}{text[-2:]}"
+
+def github_history_backup_config():
+    token = get_config_value("STOCKGENIE_HISTORY_GITHUB_TOKEN", "HISTORY_GITHUB_TOKEN")
+    repo = get_config_value(
+        "STOCKGENIE_HISTORY_GITHUB_REPO",
+        "HISTORY_GITHUB_REPO",
+        "GITHUB_REPOSITORY",
+    )
+    if not token or not repo:
+        return None
+
+    return {
+        "token": token,
+        "repo": str(repo).strip(),
+        "branch": (
+            get_config_value("STOCKGENIE_HISTORY_GITHUB_BRANCH", "HISTORY_GITHUB_BRANCH")
+            or "history"
+        ),
+        "path": (
+            get_config_value("STOCKGENIE_HISTORY_GITHUB_PATH", "HISTORY_GITHUB_PATH")
+            or "stock_picks.db"
+        ),
+    }
+
+def github_history_backup_url(config):
+    return f"https://api.github.com/repos/{config['repo']}/contents/{config['path']}"
+
+def github_history_backup_headers(config):
+    return {
+        "Authorization": f"Bearer {config['token']}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+def local_history_row_count():
+    if not DB_PATH.exists():
+        return 0
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        has_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'daily_picks'"
+        ).fetchone()
+        if not has_table:
+            return 0
+        return int(conn.execute("SELECT COUNT(*) FROM daily_picks").fetchone()[0] or 0)
+    except sqlite3.Error as e:
+        logging.warning(f"Failed to inspect local history database at {DB_PATH}: {str(e)}")
+        return 0
+    finally:
+        if conn is not None:
+            conn.close()
+
+def fetch_github_history_backup():
+    config = github_history_backup_config()
+    if not config:
+        return None
+
+    try:
+        response = requests.get(
+            github_history_backup_url(config),
+            headers=github_history_backup_headers(config),
+            params={"ref": config["branch"]},
+            timeout=20,
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        payload = response.json()
+        content = payload.get("content")
+        if not content:
+            return None
+        return base64.b64decode(content), payload.get("sha")
+    except Exception as e:
+        logging.warning(f"Failed to fetch GitHub history backup: {str(e)}")
+        return None
+
+def restore_history_backup_if_empty():
+    if local_history_row_count() > 0:
+        return False
+
+    backup = fetch_github_history_backup()
+    if not backup:
+        return False
+
+    backup_bytes, _ = backup
+    tmp_path = DB_PATH.with_suffix(f"{DB_PATH.suffix}.restore.tmp")
+    try:
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path.write_bytes(backup_bytes)
+        conn = sqlite3.connect(tmp_path)
+        try:
+            conn.execute("SELECT COUNT(*) FROM daily_picks").fetchone()
+        finally:
+            conn.close()
+        shutil.move(str(tmp_path), str(DB_PATH))
+        logging.info(f"Restored historical picks database from GitHub backup to {DB_PATH}")
+        return True
+    except Exception as e:
+        logging.warning(f"Failed to restore GitHub history backup: {str(e)}")
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+
+def sync_history_backup():
+    config = github_history_backup_config()
+    if not config or not DB_PATH.exists():
+        return False
+
+    try:
+        existing_sha = None
+        get_response = requests.get(
+            github_history_backup_url(config),
+            headers=github_history_backup_headers(config),
+            params={"ref": config["branch"]},
+            timeout=20,
+        )
+        if get_response.status_code == 200:
+            existing_sha = get_response.json().get("sha")
+        elif get_response.status_code != 404:
+            get_response.raise_for_status()
+
+        payload = {
+            "message": f"Update StockGenie history backup {app_timestamp_string()}",
+            "content": base64.b64encode(DB_PATH.read_bytes()).decode("ascii"),
+            "branch": config["branch"],
+        }
+        if existing_sha:
+            payload["sha"] = existing_sha
+
+        put_response = requests.put(
+            github_history_backup_url(config),
+            headers=github_history_backup_headers(config),
+            json=payload,
+            timeout=30,
+        )
+        if put_response.status_code == 404:
+            logging.warning(
+                "GitHub history backup branch/path was not found. "
+                "Create the configured branch or update STOCKGENIE_HISTORY_GITHUB_BRANCH."
+            )
+            return False
+        put_response.raise_for_status()
+        return True
+    except Exception as e:
+        logging.warning(f"Failed to sync GitHub history backup: {str(e)}")
+        return False
+
+def history_storage_notice():
+    config = github_history_backup_config()
+    if config:
+        return (
+            f"History backup: GitHub {config['repo']}@{config['branch']}:"
+            f"{config['path']}"
+        )
+    if DB_PATH != DEFAULT_DB_PATH:
+        return f"History database: {DB_PATH}"
+    return (
+        "History is stored in local SQLite only. On Streamlit Cloud this can reset "
+        "after the app sleeps or restarts; configure persistent storage for durable history."
+    )
 
 @st.cache_data(ttl=86400)
 def load_symbol_token_map():
@@ -2606,13 +2797,18 @@ def refresh_setup_expectancy_database():
                 updated_at = excluded.updated_at
         ''', rows)
         conn.commit()
+        conn.close()
+        conn = None
+        sync_history_backup()
         return len(rows)
     except sqlite3.OperationalError as e:
-        conn.rollback()
+        if conn is not None:
+            conn.rollback()
         logging.exception(f"Failed to refresh setup expectancy database: {str(e)}")
         return 0
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 def quote_identifier(identifier):
     return '"' + str(identifier).replace('"', '""') + '"'
@@ -2690,7 +2886,7 @@ def migrate_daily_picks_primary_key(conn):
     ''')
     conn.execute("DROP TABLE daily_picks_old")
 
-def init_database():
+def init_database(allow_restore=True):
     conn = get_db_connection()
     conn.execute('''
         CREATE TABLE IF NOT EXISTS daily_picks (
@@ -2814,6 +3010,8 @@ def init_database():
     migrate_daily_picks_primary_key(conn)
     conn.commit()
     conn.close()
+    if allow_restore and restore_history_backup_if_empty():
+        init_database(allow_restore=False)
 
 def insert_top_picks(results_df, pick_type="daily"):
     if results_df is None or results_df.empty:
@@ -2884,6 +3082,7 @@ def insert_top_picks(results_df, pick_type="daily"):
     
     conn.commit()
     conn.close()
+    sync_history_backup()
     return len(data_to_insert)
 
 def calculate_holding_period_outcome(symbol, entry_date, entry_price):
@@ -3073,13 +3272,19 @@ def update_exit_advice(limit=50):
             updated += 1
 
         conn.commit()
+        conn.close()
+        conn = None
+        if updated:
+            sync_history_backup()
         return updated
     except sqlite3.OperationalError as e:
-        conn.rollback()
+        if conn is not None:
+            conn.rollback()
         logging.exception(f"Failed to update exit advice: {str(e)}")
         return 0
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 def update_holding_period_outcomes(limit=50):
     conn = get_db_connection()
@@ -3141,13 +3346,19 @@ def update_holding_period_outcomes(limit=50):
             updated += 1
 
         conn.commit()
+        conn.close()
+        conn = None
+        if updated:
+            sync_history_backup()
         return updated
     except sqlite3.OperationalError as e:
-        conn.rollback()
+        if conn is not None:
+            conn.rollback()
         logging.exception(f"Failed to update holding-period outcomes: {str(e)}")
         return 0
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 def holding_period_expectancy(history_df):
     pnl_columns = [f"pnl_day_{day}" for day in HOLDING_PERIOD_DAYS]
@@ -5113,6 +5324,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
         if not top_picks_df.empty:
             st.subheader("🏆 Today's Top 5 Stocks")
             st.caption(f"Saved {saved_picks_count} picks to historical database: {DB_PATH}")
+            st.caption(history_storage_notice())
             for _, row in top_picks_df.iterrows():
                 grade = row.get("Confidence Grade") or confidence_grade(row)
                 swing_signal = swing_signal_for_grade(grade)
@@ -5240,6 +5452,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
         if not intraday_results.empty:
             st.subheader("🏆 Top 5 Intraday Stocks (⚡ Fast Exit)")
             st.caption(f"Saved {saved_intraday_count} picks to historical database: {DB_PATH}")
+            st.caption(history_storage_notice())
             for _, row in intraday_results.iterrows():
                 grade = row.get("Confidence Grade") or confidence_grade(row)
                 with st.expander(f"{row['Symbol']} - Grade {grade} - {tooltip('Score', TOOLTIPS['Score'])}: {row['Score']}/7"):
@@ -5303,6 +5516,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
         if not history_df.empty:
             st.subheader("📜 Historical Top Picks")
             st.caption(f"Database: {DB_PATH}")
+            st.caption(history_storage_notice())
             if updated_outcomes:
                 st.caption(f"Updated holding-period outcomes for {updated_outcomes} picks.")
             if updated_exit_advice:
@@ -5336,6 +5550,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
         else:
             st.warning("⚠️ No historical data available in the SQLite database.")
             st.caption(f"Database: {DB_PATH}")
+            st.info(history_storage_notice())
             session_frames = []
             if isinstance(st.session_state.get("last_daily_top_picks"), pd.DataFrame):
                 latest_daily = st.session_state.last_daily_top_picks.copy()

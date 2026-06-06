@@ -166,6 +166,27 @@ streamlit run dd.py
 
 For hosted deployment, make sure environment variables or Streamlit secrets are configured before running the app.
 
+### Persistent Historical Picks
+
+The app writes historical picks to SQLite. On a local machine this defaults to `stock_picks.db` beside `dd.py`, but Streamlit Cloud can discard runtime file changes when the app sleeps or restarts. If users need history to survive overnight, configure one of these durable storage options.
+
+For hosts with a persistent disk, set `STOCKGENIE_DB_PATH` to the mounted database path:
+
+```env
+STOCKGENIE_DB_PATH=/data/stock_picks.db
+```
+
+For Streamlit Cloud or other ephemeral hosts, configure the optional GitHub backup. Create the target branch first, then add these values as Streamlit secrets:
+
+```env
+STOCKGENIE_HISTORY_GITHUB_TOKEN=your_github_token
+STOCKGENIE_HISTORY_GITHUB_REPO=owner/repository
+STOCKGENIE_HISTORY_GITHUB_BRANCH=history
+STOCKGENIE_HISTORY_GITHUB_PATH=stock_picks.db
+```
+
+When configured, the app restores the backup if the local database is empty and syncs the SQLite file after picks or historical outcome updates are saved.
+
 ## Risk Notes
 
 - Do not chase stocks far above the suggested buy level.
