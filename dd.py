@@ -532,6 +532,7 @@ FRESH_BREAKOUT_DECAY_BONUSES = {
     2: 0.3,
     3: 0.1,
 }
+BREAKOUT_QUALITY_GRADE_ORDER = ["C", "B", "B+", "A", "A+"]
 SECTOR_EXHAUSTION_MOVE_THRESHOLD = 10.0
 SECTOR_EXHAUSTION_RANKING_PENALTY = 0.5
 TREND_PERSISTENCE_LOOKBACK = 5
@@ -3309,6 +3310,8 @@ def init_database(allow_restore=True):
         "rvol": "REAL",
         "liquidity_value": "REAL",
         "breakout_age": "REAL",
+        "breakout_quality": "TEXT",
+        "breakout_quality_score": "REAL",
         "ema20_distance": "REAL",
         "sector_leader_score": "REAL",
         "sector_leader_adjustment": "REAL",
@@ -3388,6 +3391,8 @@ def insert_top_picks(results_df, pick_type="daily"):
                 db_value(row.get('RVOL')),
                 db_value(row.get('Avg Volume Value')),
                 db_value(row.get('Fresh Breakout Age')),
+                row.get('Breakout Quality'),
+                db_value(row.get('Breakout Quality Score')),
                 db_value(row.get('EMA20 Distance %')),
                 db_value(row.get('Sector Leader Score')),
                 db_value(row.get('Sector Leader Adjustment')),
@@ -3405,10 +3410,11 @@ def insert_top_picks(results_df, pick_type="daily"):
                 ichimoku_trend, recommendation, regime, position_size, trailing_stop,
                 reason, pick_type, entry_date, entry_price, setup_type, sector,
                 relative_strength, sector_relative_strength, trend_persistence,
-                rvol, liquidity_value, breakout_age, ema20_distance,
+                rvol, liquidity_value, breakout_age, breakout_quality,
+                breakout_quality_score, ema20_distance,
                 sector_leader_score, sector_leader_adjustment, optimal_hold_days,
                 expected_hold_days, exit_review_day, exit_status, exit_reason
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', data_to_insert)
         
         conn.commit()
@@ -4017,6 +4023,7 @@ def analyze_all_stocks(stock_list, batch_size=10, progress_callback=None):
     expected_cols = [
         "Symbol", "Score", "Current Price", "Recent Return", "Trend Persistence", "Latest Move %",
         "EMA20 Distance %", "Fresh Breakout Age", "Consolidation Candles", "RVOL", "Avg Volume Value",
+        "Breakout Quality", "Breakout Quality Score",
         "Buy At", "Stop Loss", "Target", "Recommendation", "Intraday", "Swing", "Short-Term",
         "Long-Term", "Mean_Reversion", "Breakout", "Ichimoku_Trend", "Major Trend Conflict",
         "Status", "Error"
@@ -4159,6 +4166,7 @@ def analyze_intraday_stocks(stock_list, batch_size=10, progress_callback=None):
     expected_cols = [
         "Symbol", "Score", "Current Price", "Recent Return", "Trend Persistence", "Latest Move %",
         "Previous Day Move %", "Overnight Gap %", "EMA20 Distance %", "Fresh Breakout Age", "Consolidation Candles", "RVOL", "Avg Volume Value",
+        "Breakout Quality", "Breakout Quality Score",
         "Intraday", "Recommendation", "Buy At", "Stop Loss", "Target",
         "Ichimoku_Trend", "Major Trend Conflict", "Entry Type"
     ]
@@ -4896,6 +4904,94 @@ def fresh_breakout_bonus(row):
         return 0.0
     return FRESH_BREAKOUT_DECAY_BONUSES.get(int(breakout_age), 0.0)
 
+def cap_breakout_quality_grade(grade, cap):
+    if grade not in BREAKOUT_QUALITY_GRADE_ORDER or cap not in BREAKOUT_QUALITY_GRADE_ORDER:
+        return grade
+    return BREAKOUT_QUALITY_GRADE_ORDER[
+        min(
+            BREAKOUT_QUALITY_GRADE_ORDER.index(grade),
+            BREAKOUT_QUALITY_GRADE_ORDER.index(cap),
+        )
+    ]
+
+def breakout_quality_details(row):
+    breakout_age = to_number_or_none(row.get("Fresh Breakout Age"))
+    consolidation_candles = to_number_or_none(row.get("Consolidation Candles"))
+    rvol = to_number_or_none(row.get("RVOL"))
+    trend_persistence = to_number_or_none(row.get("Trend Persistence"))
+    liquidity_score = to_number_or_none(row.get("Liquidity Score"))
+
+    if breakout_age is not None:
+        breakout_age = int(breakout_age)
+
+    if breakout_age == 1:
+        age_score = 40
+    elif breakout_age == 2:
+        age_score = 22
+    elif breakout_age == 3:
+        age_score = 14
+    else:
+        age_score = 10
+
+    if consolidation_candles is not None and consolidation_candles >= 6:
+        consolidation_score = 20
+    elif consolidation_candles is not None and consolidation_candles >= 4:
+        consolidation_score = 16
+    elif consolidation_candles is not None and consolidation_candles >= 2:
+        consolidation_score = 10
+    elif breakout_age == 1:
+        consolidation_score = 8
+    else:
+        consolidation_score = 6
+
+    if rvol is None:
+        rvol_score = 0
+    elif rvol >= 2:
+        rvol_score = 20
+    elif rvol >= 1.5:
+        rvol_score = 14
+    elif rvol >= 1:
+        rvol_score = 8
+    elif rvol >= 0.8:
+        rvol_score = 5
+    else:
+        rvol_score = 0
+
+    if trend_persistence is None:
+        persistence_score = 0
+    elif trend_persistence >= 90:
+        persistence_score = 30
+    elif trend_persistence >= 85:
+        persistence_score = 28
+    elif trend_persistence >= 75:
+        persistence_score = 20
+    elif trend_persistence >= 60:
+        persistence_score = 12
+    elif trend_persistence >= 50:
+        persistence_score = 8
+    else:
+        persistence_score = 0
+
+    score = age_score + consolidation_score + rvol_score + persistence_score
+    if score >= 80:
+        grade = "A+"
+    elif score >= 70:
+        grade = "A"
+    elif score >= 48:
+        grade = "B+"
+    elif score >= 35:
+        grade = "B"
+    else:
+        grade = "C"
+
+    if liquidity_score is not None and liquidity_score < 0.75:
+        grade = cap_breakout_quality_grade(grade, "B")
+
+    return pd.Series({
+        "Breakout Quality Score": round(score, 1),
+        "Breakout Quality": grade,
+    })
+
 def sector_exhaustion_penalty(row, intraday=False):
     if intraday:
         return 0.0
@@ -5187,6 +5283,8 @@ def add_entry_quality_columns(
         ranked_df["Intraday Liquidity Factor"] = 0.0
         ranked_df["Gap Risk Penalty"] = 0.0
         ranked_df["Fresh Breakout Bonus"] = 0.0
+        ranked_df["Breakout Quality Score"] = np.nan
+        ranked_df["Breakout Quality"] = pd.Series(dtype=object)
         ranked_df["Consolidation Candles"] = np.nan
         ranked_df["Sector Exhaustion Penalty"] = 0.0
         ranked_df["Trend Persistence Adjustment"] = 0.0
@@ -5281,6 +5379,9 @@ def add_entry_quality_columns(
         ranked_df["RVOL Score"] = ranked_df["RVOL"].apply(rvol_adjustment)
         ranked_df["Gap Risk Penalty"] = 0.0
     ranked_df["Fresh Breakout Bonus"] = ranked_df.apply(fresh_breakout_bonus, axis=1)
+    breakout_quality = ranked_df.apply(breakout_quality_details, axis=1)
+    ranked_df["Breakout Quality Score"] = breakout_quality["Breakout Quality Score"]
+    ranked_df["Breakout Quality"] = breakout_quality["Breakout Quality"]
     ranked_df["Sector Exhaustion Penalty"] = ranked_df.apply(
         lambda row: sector_exhaustion_penalty(row, intraday=intraday),
         axis=1,
@@ -5445,6 +5546,8 @@ def format_yes_no(value):
 
 def ranking_audit_text(row):
     grade = row.get("Confidence Grade") or confidence_grade(row)
+    breakout_quality = row.get("Breakout Quality") or "N/A"
+    breakout_quality_score = row.get("Breakout Quality Score")
     market_regime = row.get("Market Regime") or "Unknown"
     market_multiplier = to_number_or_none(row.get("Market Regime Multiplier")) or 1.0
     market_breadth_pct = to_number_or_none(row.get("Market Breadth %"))
@@ -5563,6 +5666,7 @@ def ranking_audit_text(row):
 
     return (
         f"Grade: {grade}  \n"
+        f"Breakout Quality: {breakout_quality} ({format_number(breakout_quality_score, 0)})  \n"
         f"{market_regime_text}  \n"
         f"Opportunity Score: {format_number(row.get('Ranking Score'))} | "
         f"RS: {format_percent(row.get('Relative Strength'))} "
@@ -5693,8 +5797,9 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
             st.caption(history_storage_notice())
             for _, row in top_picks_df.iterrows():
                 grade = row.get("Confidence Grade") or confidence_grade(row)
+                breakout_quality = row.get("Breakout Quality") or "N/A"
                 swing_signal = swing_signal_for_grade(grade)
-                with st.expander(f"{row['Symbol']} - Grade {grade} - {tooltip('Score', TOOLTIPS['Score'])}: {row['Score']}/7"):
+                with st.expander(f"{row['Symbol']} - Grade {grade} - Breakout {breakout_quality} - {tooltip('Score', TOOLTIPS['Score'])}: {row['Score']}/7"):
                     current_price = row.get('Current Price', 'N/A')
                     buy_at = row.get('Buy At', 'N/A')
                     stop_loss = row.get('Stop Loss', 'N/A')
@@ -5711,6 +5816,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                         {buy_icon} {buy_label}: {format_currency(buy_display_value)} | Stop Loss: {format_currency(stop_loss)}  
                         Target: {format_currency(target)}  
                         **Confidence Grade**: {grade}
+                        **Breakout Quality**: {breakout_quality}
                         **Audit**: {ranking_audit_text(row)}
                         **Hold Plan**:
                         {hold_advice}
@@ -5726,6 +5832,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                         {buy_icon} {buy_label}: {format_currency(buy_display_value)} | Stop Loss: {format_currency(stop_loss)}  
                         Target: {format_currency(target)}  
                         **Confidence Grade**: {grade}
+                        **Breakout Quality**: {breakout_quality}
                         **Audit**: {ranking_audit_text(row)}
                         **Hold Plan**:
                         {hold_advice}
@@ -5806,7 +5913,8 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
             st.caption(history_storage_notice())
             for _, row in intraday_results.iterrows():
                 grade = row.get("Confidence Grade") or confidence_grade(row)
-                with st.expander(f"{row['Symbol']} - Grade {grade} - {tooltip('Score', TOOLTIPS['Score'])}: {row['Score']}/7"):
+                breakout_quality = row.get("Breakout Quality") or "N/A"
+                with st.expander(f"{row['Symbol']} - Grade {grade} - Breakout {breakout_quality} - {tooltip('Score', TOOLTIPS['Score'])}: {row['Score']}/7"):
                     current_price = row.get('Current Price', 'N/A')
                     buy_at = row.get('Buy At', 'N/A')
                     stop_loss = row.get('Stop Loss', 'N/A')
@@ -5823,6 +5931,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                         {buy_icon} {buy_label}: {format_currency(buy_display_value)} | Stop Loss: {format_currency(stop_loss)}  
                         Target: {format_currency(target)}  
                         **Confidence Grade**: {grade}
+                        **Breakout Quality**: {breakout_quality}
                         **Audit**: {ranking_audit_text(row)}
                         Recommendation: {colored_recommendation(row.get('Recommendation', 'N/A'))}  
                         Regime: {row.get('Regime', 'N/A')}  
@@ -5836,6 +5945,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                         {buy_icon} {buy_label}: {format_currency(buy_display_value)} | Stop Loss: {format_currency(stop_loss)}  
                         Target: {format_currency(target)}  
                         **Confidence Grade**: {grade}
+                        **Breakout Quality**: {breakout_quality}
                         **Audit**: {ranking_audit_text(row)}
                         Intraday: {colored_recommendation(row.get('Intraday', 'N/A'))}
                         
