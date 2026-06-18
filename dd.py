@@ -6004,16 +6004,16 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
             setup_win_rate_df = setup_type_win_rate_table(history_df[history_df["pick_type"] == "daily"])
             if not setup_win_rate_df.empty:
                 with st.expander("Setup-Type Win Rate", expanded=True):
-                    st.dataframe(setup_win_rate_df, width="stretch")
+                    st.dataframe(setup_win_rate_df, use_container_width=True)
             if not setup_expectancy_df.empty:
                 with st.expander("Setup Expectancy Database", expanded=True):
-                    st.dataframe(setup_expectancy_df, width="stretch")
+                    st.dataframe(setup_expectancy_df, use_container_width=True)
             if not setup_metrics_df.empty:
                 with st.expander("Setup Holding Metrics", expanded=False):
-                    st.dataframe(setup_metrics_df, width="stretch")
+                    st.dataframe(setup_metrics_df, use_container_width=True)
             if not expectancy_df.empty:
                 with st.expander("Holding Period Expectancy", expanded=False):
-                    st.dataframe(expectancy_df, width="stretch")
+                    st.dataframe(expectancy_df, use_container_width=True)
             st.dataframe(filtered_df)
         else:
             st.warning("⚠️ No historical data available in the SQLite database.")
@@ -6111,7 +6111,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                     sim_df = pd.DataFrame(simulations).T
                     sim_df.index = [data.index[-1] + timedelta(days=i) for i in range(len(sim_df))]
                     fig_sim = px.line(sim_df, title="Price Projections")
-                    st.plotly_chart(fig_sim, width="stretch")
+                    st.plotly_chart(fig_sim, use_container_width=True)
             else:
                 st.caption("Optional advanced analysis. Skipped during scans.")
 
@@ -6153,7 +6153,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                 fig.add_scatter(x=data.index, y=data['Ichimoku_Span_A'], mode='lines', name='Ichimoku Span A', line=dict(color='purple'))
             if 'Ichimoku_Span_B' in data.columns and data['Ichimoku_Span_B'].notnull().any():
                 fig.add_scatter(x=data.index, y=data['Ichimoku_Span_B'], mode='lines', name='Ichimoku Span B', line=dict(color='purple', dash='dash'))
-            st.plotly_chart(fig, width="stretch")
+            st.plotly_chart(fig, use_container_width=True)
 
             # Sub-charts
             c1, c2 = st.columns(2)
@@ -6162,11 +6162,11 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                 fig_ind = px.line(data, x=data.index, y='RSI')
                 fig_ind.add_hline(y=70, line_dash="dash", line_color="red")
                 fig_ind.add_hline(y=30, line_dash="dash", line_color="green")
-                st.plotly_chart(fig_ind, width="stretch")
+                st.plotly_chart(fig_ind, use_container_width=True)
             with c2:
                 st.subheader("MACD")
                 fig_macd = px.line(data, x=data.index, y=['MACD', 'MACD_signal'])
-                st.plotly_chart(fig_macd, width="stretch")
+                st.plotly_chart(fig_macd, use_container_width=True)
 
             # Volume Analysis
             st.subheader("📊 Volume Analysis")
@@ -6176,7 +6176,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                 if not spike_data.empty:
                     fig_vol.add_scatter(x=spike_data.index, y=spike_data['Volume'], mode='markers', name='Volume Spike',
                                        marker=dict(color='red', size=10))
-            st.plotly_chart(fig_vol, width="stretch")
+            st.plotly_chart(fig_vol, use_container_width=True)
 
         # 3. BACKTESTING TAB
         with tab_backtest:
@@ -6232,7 +6232,7 @@ def display_dashboard(symbol=None, data=None, recommendations=None):
                         sell_dates, sell_prices = zip(*backtest_results["sell_signals"])
                         fig.add_scatter(x=sell_dates, y=sell_prices, mode='markers', name='Sell Signals',
                                        marker=dict(color='red', symbol='triangle-down', size=15))
-                    st.plotly_chart(fig, width="stretch")
+                    st.plotly_chart(fig, use_container_width=True)
     
             
 def main():
