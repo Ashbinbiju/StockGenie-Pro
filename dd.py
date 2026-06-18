@@ -214,6 +214,26 @@ def get_config_value(*names):
     value, _ = get_config_value_with_source(*names)
     return value
 
+def get_float_config(default, *names):
+    value = get_config_value(*names)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        logging.warning(f"Invalid float config for {', '.join(names)}: {value}")
+        return default
+
+def get_int_config(default, *names):
+    value = get_config_value(*names)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        logging.warning(f"Invalid integer config for {', '.join(names)}: {value}")
+        return default
+
 def mask_secret(value):
     if not value:
         return "missing"
@@ -467,6 +487,30 @@ API_KEYS = {
     "Trading": get_config_value("TRADING_API_KEY", "API_KEY", "api_key"),
     "Market": get_config_value("MARKET_API_KEY", "market_api_key")
 }
+SMARTAPI_CANDLE_MIN_INTERVAL = max(
+    0.5,
+    get_float_config(1.2, "SMARTAPI_CANDLE_MIN_INTERVAL", "SMARTAPI_RATE_LIMIT_SECONDS", "smartapi_candle_min_interval"),
+)
+SMARTAPI_RATE_LIMIT_COOLDOWN = max(
+    1.0,
+    get_float_config(8.0, "SMARTAPI_RATE_LIMIT_COOLDOWN", "smartapi_rate_limit_cooldown"),
+)
+SMARTAPI_RATE_LIMIT_JITTER = max(
+    0.0,
+    get_float_config(2.0, "SMARTAPI_RATE_LIMIT_JITTER", "smartapi_rate_limit_jitter"),
+)
+SMARTAPI_CANDLE_RETRIES = max(
+    1,
+    get_int_config(4, "SMARTAPI_CANDLE_RETRIES", "smartapi_candle_retries"),
+)
+SMARTAPI_DAILY_WORKERS = max(
+    1,
+    get_int_config(2, "SMARTAPI_DAILY_WORKERS", "smartapi_daily_workers"),
+)
+SMARTAPI_INTRADAY_WORKERS = max(
+    1,
+    get_int_config(1, "SMARTAPI_INTRADAY_WORKERS", "smartapi_intraday_workers"),
+)
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -1085,20 +1129,61 @@ def fetch_nse_stock_list():
         return filter_tradable_symbols([stock for sector in SECTORS.values() for stock in sector])
 
 # SmartAPI Rate Limiter for Candle Data
-# Limit: 3 requests per second => 1 request every ~0.34 seconds
+# Broker limits vary by endpoint/key; keep candle calls conservative by default.
 last_api_call_time = 0
+smartapi_cooldown_until = 0
 
 # Thread-safe rate limiter
 rate_limit_lock = threading.Lock()
 
-def enforce_rate_limit(min_interval=0.5): # Increased to 0.5s (2 req/s) for safety
+def enforce_rate_limit(min_interval=None):
     global last_api_call_time
+    if min_interval is None:
+        min_interval = SMARTAPI_CANDLE_MIN_INTERVAL
+
+    while True:
+        with rate_limit_lock:
+            current_time = time.time()
+            interval_wait = min_interval - (current_time - last_api_call_time)
+            cooldown_wait = smartapi_cooldown_until - current_time
+            sleep_for = max(interval_wait, cooldown_wait, 0)
+            if sleep_for <= 0:
+                last_api_call_time = current_time
+                return
+        time.sleep(sleep_for)
+
+def activate_smartapi_cooldown(seconds):
+    global smartapi_cooldown_until
     with rate_limit_lock:
-        current_time = time.time()
-        elapsed = current_time - last_api_call_time
-        if elapsed < min_interval:
-            time.sleep(min_interval - elapsed)
-        last_api_call_time = time.time()
+        smartapi_cooldown_until = max(smartapi_cooldown_until, time.time() + seconds)
+
+def is_smartapi_rate_limit_error(error):
+    if isinstance(error, dict):
+        text = " ".join(
+            str(error.get(key, ""))
+            for key in ("message", "error", "errorMessage", "errorcode", "errorCode")
+        )
+    else:
+        text = str(error)
+
+    text = text.lower()
+    return (
+        "exceeding access rate" in text
+        or ("access denied" in text and "rate" in text)
+        or "too many requests" in text
+        or "rate limit" in text
+    )
+
+def sleep_after_smartapi_rate_limit(symbol, attempt):
+    sleep_for = (
+        SMARTAPI_RATE_LIMIT_COOLDOWN * (2 ** attempt)
+        + random.uniform(0, SMARTAPI_RATE_LIMIT_JITTER)
+    )
+    activate_smartapi_cooldown(sleep_for)
+    logging.warning(
+        f"SmartAPI rate limit hit for {symbol}. Cooling down candle requests for {sleep_for:.1f}s..."
+    )
+    time.sleep(sleep_for)
 
 def set_smartapi_auth_error(message):
     global smartapi_auth_error
@@ -1166,16 +1251,14 @@ def fetch_stock_data_with_auth(symbol, period="2y", interval="1d"):
             return pd.DataFrame()
         exchange = load_symbol_exchange_map().get(symbol, "NSE")
 
-        # Enforce rate limit before making the API call
-        enforce_rate_limit()
-
         # Retry logic for API instability
-        for attempt in range(3):
+        for attempt in range(SMARTAPI_CANDLE_RETRIES):
             try:
                 if not smart_api or not hasattr(smart_api, "getCandleData"):
                     logging.error(f"SmartAPI client unavailable for {symbol}; skipping candle request.")
                     return pd.DataFrame()
 
+                enforce_rate_limit()
                 historical_data = smart_api.getCandleData({
                     "exchange": exchange,
                     "symboltoken": symboltoken,
@@ -1201,6 +1284,14 @@ def fetch_stock_data_with_auth(symbol, period="2y", interval="1d"):
                         
                     cache.set(cache_key, buffer.getvalue(), expire=expire_time)
                     return data
+
+                elif historical_data and isinstance(historical_data, dict) and is_smartapi_rate_limit_error(historical_data):
+                    if attempt >= SMARTAPI_CANDLE_RETRIES - 1:
+                        activate_smartapi_cooldown(SMARTAPI_RATE_LIMIT_COOLDOWN)
+                        logging.warning(f"SmartAPI rate limit persisted for {symbol}; skipping after {SMARTAPI_CANDLE_RETRIES} attempts.")
+                        return pd.DataFrame()
+                    sleep_after_smartapi_rate_limit(symbol, attempt)
+                    continue
                 
                 # Handling INVALID TOKEN (AG8001) - Force Re-login
                 elif historical_data and isinstance(historical_data, dict) and historical_data.get('errorCode') == 'AG8001':
@@ -1223,7 +1314,7 @@ def fetch_stock_data_with_auth(symbol, period="2y", interval="1d"):
 
                 elif historical_data and isinstance(historical_data, dict) and (historical_data.get('errorcode') == 'AB1004' or historical_data.get('message') == 'Internal Server Error'):
                      # Retry on recognized temporary server errors
-                     logging.warning(f"Server error for {symbol}, retrying ({attempt+1}/3)...")
+                     logging.warning(f"Server error for {symbol}, retrying ({attempt+1}/{SMARTAPI_CANDLE_RETRIES})...")
                      time.sleep(1 * (attempt + 1))
                      continue
                 else:
@@ -1231,23 +1322,31 @@ def fetch_stock_data_with_auth(symbol, period="2y", interval="1d"):
                     return pd.DataFrame()
 
             except Exception as e:
+                if is_smartapi_rate_limit_error(e):
+                    if attempt >= SMARTAPI_CANDLE_RETRIES - 1:
+                        activate_smartapi_cooldown(SMARTAPI_RATE_LIMIT_COOLDOWN)
+                        logging.warning(f"SmartAPI rate limit persisted for {symbol}; skipping after {SMARTAPI_CANDLE_RETRIES} attempts.")
+                        return pd.DataFrame()
+                    sleep_after_smartapi_rate_limit(symbol, attempt)
+                    continue
                 # Catch connection errors/timeouts during call
-                 logging.warning(f"Exception for {symbol}, retrying ({attempt+1}/3): {str(e)}")
-                 time.sleep(1 * (attempt + 1))
+                logging.warning(f"Exception for {symbol}, retrying ({attempt+1}/{SMARTAPI_CANDLE_RETRIES}): {str(e)}")
+                time.sleep(1 * (attempt + 1))
 
         return pd.DataFrame()
 
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 429:
+            sleep_after_smartapi_rate_limit(symbol, 0)
             logging.warning(f"⚠️ Rate limit exceeded for {symbol}. Skipping...")
             return pd.DataFrame()
         raise e
     except Exception as e:
         # Check for specific "Rate Limit" string in exception message
-        if "exceeding access rate" in str(e):
-             logging.warning(f"Rate limit hit for {symbol}. Prioritizing safety sleep...")
-             time.sleep(5) # Long sleep if hit hard limit
-             return pd.DataFrame()
+        if is_smartapi_rate_limit_error(e):
+            sleep_after_smartapi_rate_limit(symbol, 0)
+            logging.warning(f"Rate limit hit for {symbol}. Skipping after safety cooldown.")
+            return pd.DataFrame()
         logging.warning(f"⚠️ Error fetching data for {symbol}: {str(e)}")
         return pd.DataFrame()
 
@@ -1277,6 +1376,10 @@ def fetch_nifty_recent_return(interval="ONE_DAY", lookback_days=10, candles=5):
             "todate": end_date.strftime("%Y-%m-%d %H:%M")
         })
 
+        if historical_data and isinstance(historical_data, dict) and is_smartapi_rate_limit_error(historical_data):
+            sleep_after_smartapi_rate_limit("NIFTY benchmark", 0)
+            return 0.0
+
         if not historical_data or not isinstance(historical_data, dict) or not historical_data.get("data"):
             return 0.0
 
@@ -1284,6 +1387,9 @@ def fetch_nifty_recent_return(interval="ONE_DAY", lookback_days=10, candles=5):
         return_value = calculate_recent_return(data, candles=candles)
         return 0.0 if pd.isna(return_value) else float(return_value)
     except Exception as e:
+        if is_smartapi_rate_limit_error(e):
+            sleep_after_smartapi_rate_limit("NIFTY benchmark", 0)
+            return 0.0
         logging.warning(f"Failed to compute NIFTY relative-strength benchmark: {str(e)}")
         return 0.0
 
@@ -1358,6 +1464,10 @@ def fetch_nifty_regime_snapshot():
             "todate": end_date.strftime("%Y-%m-%d %H:%M")
         })
 
+        if historical_data and isinstance(historical_data, dict) and is_smartapi_rate_limit_error(historical_data):
+            sleep_after_smartapi_rate_limit("NIFTY regime", 0)
+            return fetch_yahoo_nifty_regime_snapshot()
+
         if not historical_data or not isinstance(historical_data, dict) or not historical_data.get("data"):
             return fetch_yahoo_nifty_regime_snapshot()
 
@@ -1365,6 +1475,9 @@ def fetch_nifty_regime_snapshot():
         snapshot = nifty_regime_snapshot_from_closes(data["Close"], "SmartAPI")
         return snapshot or fetch_yahoo_nifty_regime_snapshot()
     except Exception as e:
+        if is_smartapi_rate_limit_error(e):
+            sleep_after_smartapi_rate_limit("NIFTY regime", 0)
+            return fetch_yahoo_nifty_regime_snapshot()
         logging.warning(f"Failed to compute NIFTY market regime: {str(e)}")
         return fetch_yahoo_nifty_regime_snapshot()
 
@@ -3786,7 +3899,7 @@ def expected_hold_text(row):
             text += f"  \n{probability_part}"
     return text
 
-def analyze_batch(stock_batch, patience="high", interval="1d"):
+def analyze_batch(stock_batch, patience="high", interval="1d", max_workers=None):
     """
     Analyzes a batch of stocks in parallel.
     Returns a list of results (dictionaries) for ALL processed stocks, including failures.
@@ -3795,8 +3908,10 @@ def analyze_batch(stock_batch, patience="high", interval="1d"):
     recommendation_mode = st.session_state.get('recommendation_mode', 'Standard')
     
     results = []
-    # Reduced max_workers to 2 to prevent API Rate Limit hits
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    if max_workers is None:
+        max_workers = SMARTAPI_INTRADAY_WORKERS if interval in ("5m", "15m") else SMARTAPI_DAILY_WORKERS
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Pass recommendation_mode explicitly to the worker
         futures = {executor.submit(analyze_stock_parallel, symbol, patience, interval, recommendation_mode): symbol for symbol in stock_batch}
         for future in as_completed(futures):
