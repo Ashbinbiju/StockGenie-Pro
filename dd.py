@@ -533,6 +533,12 @@ FRESH_BREAKOUT_DECAY_BONUSES = {
     3: 0.1,
 }
 BREAKOUT_QUALITY_GRADE_ORDER = ["C", "B", "B+", "A", "A+"]
+BREAKOUT_QUALITY_MAX_SCORE_BY_GRADE = {
+    "C": 34.0,
+    "B": 47.0,
+    "B+": 69.0,
+    "A": 79.0,
+}
 SECTOR_EXHAUSTION_MOVE_THRESHOLD = 10.0
 SECTOR_EXHAUSTION_RANKING_PENALTY = 0.5
 TREND_PERSISTENCE_LOOKBACK = 5
@@ -4914,6 +4920,29 @@ def cap_breakout_quality_grade(grade, cap):
         )
     ]
 
+def breakout_quality_grade_for_score(score):
+    score = to_number_or_none(score)
+    if score is None:
+        return "C"
+    if score >= 80:
+        return "A+"
+    if score >= 70:
+        return "A"
+    if score >= 48:
+        return "B+"
+    if score >= 35:
+        return "B"
+    return "C"
+
+def cap_breakout_quality_score(score, grade):
+    score = to_number_or_none(score)
+    if score is None:
+        return score
+    max_score = BREAKOUT_QUALITY_MAX_SCORE_BY_GRADE.get(grade)
+    if max_score is None:
+        return score
+    return min(score, max_score)
+
 def breakout_quality_details(row):
     breakout_age = to_number_or_none(row.get("Fresh Breakout Age"))
     consolidation_candles = to_number_or_none(row.get("Consolidation Candles"))
@@ -4973,19 +5002,11 @@ def breakout_quality_details(row):
         persistence_score = 0
 
     score = age_score + consolidation_score + rvol_score + persistence_score
-    if score >= 80:
-        grade = "A+"
-    elif score >= 70:
-        grade = "A"
-    elif score >= 48:
-        grade = "B+"
-    elif score >= 35:
-        grade = "B"
-    else:
-        grade = "C"
+    grade = breakout_quality_grade_for_score(score)
 
     if liquidity_score is not None and liquidity_score < 0.75:
         grade = cap_breakout_quality_grade(grade, "B")
+        score = cap_breakout_quality_score(score, grade)
 
     return pd.Series({
         "Breakout Quality Score": round(score, 1),
